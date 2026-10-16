@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Discussion mode",
-    "description": "Enter a peer design conversation: the agent stops rushing to act, acting tools are denied, and only the user can leave the mode."
+    "description": "Enter a peer design conversation: the agent stops rushing to act, acting tools are denied, and only the user can leave the mode. Also selectable as an Agent preset in the mode dropdown — such a session starts in the mode and ends with a handoff prompt you can paste into a new one."
   }
 }

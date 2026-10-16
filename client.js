@@ -83,7 +83,19 @@ window.__ModuleLoader__.load({
 - 明确不做的是这些
 - 最大的风险是 X，我建议先验证它
 
-然后停下来等用户。他可能继续抠细节，也可能就此收工——决定权在他手上，你无法自己结束这个模式。`;
+然后**默认再交出一段交接 prompt**——单独成段、用围栏代码块包起来，可以直接粘进一个全新的会话。
+
+新会话里的执行者看不到这里说过的任何一句话，所以这段 prompt 必须自足：
+
+- **目标与验收**：做完算什么
+- **范围**：先做哪些，明确不做哪些
+- **已经定下的决定**：为什么是这个方案，被否掉的备选是什么
+- **已知的坑**：必须先验证的风险、要绕开的错误路子
+- **起点**：从哪个文件或模块下手，现成的能力有哪些
+
+写成执行者可以照着做的样子，而不是讨论纪要。
+
+交完之后停下来等用户。他可能继续抠细节，也可能拿着这段 prompt 到新会话里开工——决定权在他手上，你无法自己结束这个模式。`;
 
     const CSS = `
 .dsh-dm-page { box-sizing: border-box; height: 100%; overflow: auto; padding: 24px 28px 40px; color: var(--dsw-alias-label-primary, #1a1a1a); font: var(--dsw-font-s-13, 13px/1.6 system-ui, sans-serif); }
@@ -257,6 +269,13 @@ window.__ModuleLoader__.load({
               h("span", { className: "dsh-dm-code" }, command),
               "；你也可以直接输入这条命令。",
             ),
+            h(
+              "p",
+              { className: "dsh-dm-hint" },
+              "另一个入口：在输入框上方的模式下拉框里选「讨论模式」。那里选中的是新会话的 Agent 预设，只对新会话生效；这样开的会话一进去就在讨论模式里——退出仍然只有 ",
+              h("span", { className: "dsh-dm-code" }, "/discuss off"),
+              " 和这个按钮。",
+            ),
             error === null ? null : h("p", { className: "dsh-dm-error" }, error),
             open ? null : h("p", { className: "dsh-dm-hint" }, "当前没有打开的会话。"),
           ),
@@ -271,6 +290,11 @@ window.__ModuleLoader__.load({
               h("li", null, "刚有一个模糊的念头，想知道它可不可行、坑在哪。"),
               h("li", null, "想法大致成形，想把 MVP 的范围和取舍讨论出来——谈拢了就可以关掉。"),
               h("li", null, "项目已经在跑，想拿新灵感、聊聊下一步怎么完善。"),
+            ),
+            h(
+              "p",
+              { className: "dsh-dm-hint" },
+              "收敛的时候它会默认给你一段可以直接粘进新会话的交接 prompt——讨论留在这里，动手去那边做。",
             ),
           ),
 

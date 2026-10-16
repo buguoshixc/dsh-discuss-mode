@@ -81,10 +81,20 @@ const initial = def.init();
 
 check("key is 'discuss'", def.key === "discuss");
 check("stateVersion is a non-negative integer", Number.isSafeInteger(def.stateVersion) && def.stateVersion >= 0);
-check("init starts inactive", initial.active === false && initial.running === null);
+check(
+  "init starts inactive and undecided",
+  initial.active === false && initial.decided === false && initial.running === null,
+);
+check("init reads no preset from a bare header", initial.presetId === null);
+check(
+  "init takes the preset from the session header",
+  def.init({ agentPreset: "discuss" }).presetId === "discuss",
+);
+check("init tolerates a header without one", def.init({}).presetId === null);
 
 const run = (commandId, args) => ({ type: "command/run", data: { commandId, name: "discuss", args } });
 const done = (commandId, kind) => ({ type: "command/done", data: { commandId, kind } });
+const picked = (agentPreset) => ({ type: "agent-preset/selected", data: { agentPreset } });
 
 check("ignores an unrelated event by identity", def.apply(initial, { type: "turn/start", data: {} }) === initial);
 check(
@@ -99,9 +109,16 @@ check(
   "ignores an unmatched command/done by identity",
   def.apply(initial, done("nope", "success")) === initial,
 );
+const presetInit = def.init({ agentPreset: "discuss" });
+check(
+  "ignores a re-selection of the same preset by identity",
+  def.apply(presetInit, picked("discuss")) === presetInit,
+);
+check("ignores a preset event with no id by identity", def.apply(initial, picked(undefined)) === initial);
 
 const entered = def.apply(def.apply(initial, run("c1", "")), done("c1", "success"));
 check("/discuss enters the mode", entered.active === true && entered.running === null);
+check("/discuss counts as a decision", entered.decided === true);
 
 const left = def.apply(def.apply(entered, run("c2", "off")), done("c2", "success"));
 check("/discuss off leaves the mode", left.active === false);
@@ -111,9 +128,11 @@ check("/discuss '  off  ' is trimmed and leaves the mode", padded.active === fal
 
 const failed = def.apply(def.apply(initial, run("c4", "")), done("c4", "error"));
 check("a failed run does not enter the mode", failed.active === false && failed.running === null);
+check("a failed run is not a decision", failed.decided === false);
 
 const failedExit = def.apply(def.apply(entered, run("c5", "off")), done("c5", "error"));
 check("a failed /discuss off keeps the mode active", failedExit.active === true);
+check("a failed /discuss off does not undo the decision", failedExit.decided === true);
 
 const reentered = def.apply(def.apply(entered, run("c6", "")), done("c6", "success"));
 check("/discuss while active is idempotent", reentered.active === true);
@@ -125,14 +144,63 @@ const preamble = {
 const withOpener = def.apply(initial, preamble);
 check("an opener message still enters the mode", withOpener.running.wanted === true);
 
+const switched = def.apply(def.init({ agentPreset: "standard" }), picked("discuss"));
+check("a blank session's picker moves the preset", switched.presetId === "discuss");
+
+console.log("\n[2b] the preset entrance");
+const presetSession = def.init({ agentPreset: "discuss" });
+const standardSession = def.init({ agentPreset: "standard" });
+check("a `discuss` session is in the mode before any command runs", mod.isModeActive(presetSession, "discuss") === true);
+check("a `standard` session is not", mod.isModeActive(standardSession, "discuss") === false);
+check("an unknown session is not", mod.isModeActive(undefined, "discuss") === false);
+check("the entrance can be configured away", mod.isModeActive(presetSession, null) === false);
+check("another preset id does not match", mod.isModeActive(presetSession, "chat") === false);
+check(
+  "wire.view reports the preset entrance",
+  def.wire.view(presetSession).active === true && def.wire.view(standardSession).active === false,
+);
+check(
+  "a settled /discuss off outranks the preset",
+  def.wire.view(def.apply(def.apply(presetSession, run("c8", "off")), done("c8", "success"))).active === false,
+);
+check(
+  "a preset session stays off after the user leaves",
+  mod.isModeActive(def.apply(def.apply(presetSession, run("c9", "off")), done("c9", "success")), "discuss") === false,
+);
+check(
+  "a definition built for another preset ignores this one",
+  mod.createDiscussProjection("chat").wire.view(presetSession).active === false,
+);
+check(
+  "a definition built with no preset entrance activates nothing on its own",
+  mod.createDiscussProjection(null).wire.view(initial).active === false &&
+    mod.createDiscussProjection(null).wire.view(presetSession).active === false,
+);
+check(
+  "a definition with no preset entrance still honours an explicit /discuss",
+  mod.createDiscussProjection(null).wire.view(entered).active === true,
+);
+
 console.log("\n[3] projection schemas");
 check("stateSchema accepts init", def.stateSchema.parse(initial) === initial);
+check("stateSchema accepts a preset session", def.stateSchema.parse(presetSession) === presetSession);
 check("stateSchema accepts a running state", def.stateSchema.parse(withOpener) === withOpener);
 checkThrows("stateSchema rejects a non-object", () => def.stateSchema.parse(42), /must be an object/);
 checkThrows("stateSchema rejects a missing active", () => def.stateSchema.parse({ running: null }), /active/);
 checkThrows(
+  "stateSchema rejects a missing decision",
+  () => def.stateSchema.parse({ active: false, presetId: null, running: null }),
+  /decided/,
+);
+checkThrows(
+  "stateSchema rejects a non-string presetId",
+  () => def.stateSchema.parse({ active: false, decided: false, presetId: 7, running: null }),
+  /presetId/,
+);
+checkThrows(
   "stateSchema rejects a malformed running",
-  () => def.stateSchema.parse({ active: false, running: { commandId: "c" } }),
+  () =>
+    def.stateSchema.parse({ active: false, decided: false, presetId: null, running: { commandId: "c" } }),
   /commandId/,
 );
 check("viewSchema accepts { active }", def.wire.viewSchema.parse({ active: true }).active === true);
@@ -154,6 +222,12 @@ check(
   Array.isArray(defaults.blockedTools) && defaults.blockedTools.length === mod.DEFAULT_BLOCKED_TOOLS.length,
 );
 check("empty config resolves to defaults", mod.resolveConfig({}).section === defaults.section);
+check("the preset entrance defaults to the shipped preset", defaults.presetId === mod.DEFAULT_PRESET_ID);
+check("a custom presetId wins", mod.resolveConfig({ presetId: "chat" }).presetId === "chat");
+check("presetId: null disables the entrance", mod.resolveConfig({ presetId: null }).presetId === null);
+check("an empty presetId disables the entrance", mod.resolveConfig({ presetId: "" }).presetId === null);
+checkThrows("an invalid presetId throws", () => mod.resolveConfig({ presetId: "Discuss" }), /presetId/);
+checkThrows("a numeric presetId throws", () => mod.resolveConfig({ presetId: 7 }), /presetId/);
 check(
   "a custom section wins",
   mod.resolveConfig({ section: "custom stance" }).section === "custom stance",
@@ -240,8 +314,10 @@ check(
 console.log("\n[7] policy section text resolves per session");
 const inactiveSession = { id: "s-inactive" };
 const activeSession = { id: "s-active" };
+const presetSessionOnly = { id: "s-preset" };
 stateBySession.set(inactiveSession, initial);
 stateBySession.set(activeSession, entered);
+stateBySession.set(presetSessionOnly, presetSession);
 
 check("no agent contributes nothing", seen.section.text({ agent: undefined }) === "");
 check("an unknown session contributes nothing", seen.section.text({ agent: { session: { id: "s-other" } } }) === "");
@@ -249,6 +325,10 @@ check("an inactive session contributes nothing", seen.section.text({ agent: { se
 check(
   "an active session contributes the stance text",
   seen.section.text({ agent: { session: activeSession } }) === defaults.section,
+);
+check(
+  "a preset session contributes the stance text before any command runs",
+  seen.section.text({ agent: { session: presetSessionOnly } }) === defaults.section,
 );
 
 console.log("\n[8] guard behaviour");
@@ -264,6 +344,25 @@ check("the denial names the tool", typeof denial === "string" && denial.includes
 check("the denial keeps no placeholder", typeof denial === "string" && !denial.includes("{tool}"));
 check("denies pwsh while active", typeof call("pwsh", activeSession) === "string");
 check("denies a family member while active", typeof call("agent_teams_create", activeSession) === "string");
+check("denies write in a preset session", typeof call("write", presetSessionOnly) === "string");
+check("allows a read tool in a preset session", call("read", presetSessionOnly) === undefined);
+
+console.log("\n[8b] the preset entrance can be configured away");
+const withoutPreset = mount({ presetId: null });
+const presetSessionBare = { id: "s-preset-bare" };
+withoutPreset.stateBySession.set(presetSessionBare, presetSession);
+check(
+  "the registered projection carries the configured id",
+  withoutPreset.seen.projection.wire.view(presetSession).active === false,
+);
+check(
+  "a preset session gets no stance when the entrance is off",
+  withoutPreset.seen.section.text({ agent: { session: presetSessionBare } }) === "",
+);
+check(
+  "a preset session may act when the entrance is off",
+  withoutPreset.seen.guard({ name: "write", agent: { session: presetSessionBare } }) === undefined,
+);
 
 console.log("\n[9] command handler");
 const base = { attachments: [], signal: undefined };
@@ -307,13 +406,76 @@ check("a bare /discuss steers nothing", steeredBare === false);
 console.log("\n[10] package files");
 const manifest = JSON.parse(await readFile(join(pkgDir, "package.json"), "utf8"));
 check("manifest names the bundle", manifest.name === "dsh-discuss-mode");
-check("manifest declares the bundle patch", manifest.dsh?.bundle?.patch === "./cordis.patch.yml");
+check(
+  "manifest declares both bundle layers, in order",
+  JSON.stringify(manifest.dsh?.bundle?.patch) === JSON.stringify(["./cordis.patch.yml", "./presets/discuss.patch.yml"]),
+);
 check("manifest is ESM", manifest.type === "module");
 check("manifest exports the entry", manifest.exports?.["."] === "./index.js");
+check(
+  "manifest exports the preset layer",
+  manifest.exports?.["./presets/*.patch.yml"] === "./presets/*.patch.yml",
+);
 const patch = await readFile(join(pkgDir, "cordis.patch.yml"), "utf8");
 check("patch inserts a row", /^-\s*insert:/m.test(patch));
 check("patch row names the package", patch.includes("name: 'dsh-discuss-mode'"));
 check("patch uses spaces, not tabs", !patch.includes("\t"));
+
+const presetPatch = await readFile(join(pkgDir, "presets", "discuss.patch.yml"), "utf8");
+check("preset layer ships in files", manifest.files?.includes("presets/*.patch.yml") === true);
+check("preset patch inserts a row", /^-\s*insert:/m.test(presetPatch));
+check("preset patch inserts a declaration row", presetPatch.includes("id: preset-discuss"));
+check(
+  "preset patch declares the agent-preset plugin",
+  presetPatch.includes("name: '@deepseek-ai/dsh-agent-preset'"),
+);
+check("preset patch ids the preset `discuss`", /^\s+id: discuss$/m.test(presetPatch));
+check("preset patch names it 讨论模式", /^\s+name: 讨论模式$/m.test(presetPatch));
+check("preset patch orders it after the shipped presets", /^\s+order: 5$/m.test(presetPatch));
+check("preset patch describes it", /^\s+description: \S/m.test(presetPatch));
+check("preset patch composes a plugin list", /^\s+plugins:$/m.test(presetPatch));
+check(
+  "preset patch carries the standard tool surface",
+  ["@deepseek-ai/dsh-persona", "@deepseek-ai/dsh-tool-fs", "@deepseek-ai/dsh-tool-web"].every((name) =>
+    presetPatch.includes(`name: '${name}'`),
+  ) && presetPatch.includes("name: cordis:group"),
+);
+check("preset patch does not compose the mode row a second time", !presetPatch.includes("dsh-discuss-mode"));
+check("preset patch uses spaces, not tabs", !presetPatch.includes("\t"));
+/**
+ * The registry refuses a composition whose rows are not maps carrying a `name`
+ * (`entryListProblem`, checked with the loader's own YAML dialect). The suite has
+ * no YAML parser by design, so this is the text-level proxy: every `- id:` row
+ * must declare a `name:` before the next row at the same or a lower indent.
+ * @param source - the patch file's text.
+ * @returns the id lines of rows that declare no plugin name.
+ */
+function rowsMissingName(source) {
+  const lines = source.split("\n");
+  const missing = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const row = /^(\s*)-\s+id: /.exec(lines[index]);
+    if (row === null) continue;
+    const indent = row[1].length;
+    let named = false;
+    for (let next = index + 1; next < lines.length; next += 1) {
+      const sibling = /^(\s*)-\s+/.exec(lines[next]);
+      if (sibling !== null && sibling[1].length <= indent) break;
+      if (/^\s+name: /.test(lines[next])) {
+        named = true;
+        break;
+      }
+    }
+    if (!named) missing.push(lines[index].trim());
+  }
+  return missing;
+}
+const unnamed = rowsMissingName(presetPatch);
+check("every entry-list row declares a plugin name", unnamed.length === 0, unnamed.join(" | "));
+check(
+  "the proxy would catch a nameless row",
+  rowsMissingName("- insert:\n    - id: x\n      config: {}\n").length === 1,
+);
 for (const locale of ["en", "zh"]) {
   const parsed = JSON.parse(await readFile(join(pkgDir, "locale", `${locale}.json`), "utf8"));
   check(`locale/${locale}.json carries display metadata`, typeof parsed.meta?.title === "string" && typeof parsed.meta?.description === "string");
@@ -344,6 +506,8 @@ check(
   client.includes("retainedBy?.mainView"),
 );
 check("returns to the conversation after toggling", client.includes("selectPanel(null)"));
+check("the panel points at the preset entrance", client.includes("模式下拉框"));
+check("the panel promises the handoff prompt", client.includes("交接 prompt"));
 check("manifest exports the client half", manifest.exports?.["./client"] === "./client.js");
 check("manifest declares dsh.client", manifest.dsh?.client?.platform === "web");
 check("client.js ships in files", manifest.files?.includes("client.js") === true);
@@ -359,6 +523,8 @@ check("host stance extracted", typeof hostStance === "string" && hostStance.leng
 check("client stance extracted", typeof clientStance === "string" && clientStance.length > 0);
 check("the panel shows exactly what the agent is told", hostStance === clientStance);
 check("both halves match the resolved default", clientStance === defaults.section);
+check("the stance asks for the handoff prompt", clientStance.includes("交接 prompt"));
+check("the stance says the handoff is for a new conversation", clientStance.includes("全新的会话"));
 
 // ------------------------------------------------------------------ report ---
 console.log(`\n${"=".repeat(60)}`);

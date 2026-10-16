@@ -29,6 +29,27 @@ DSH 里模型天然是任务导向的：它倾向于尽快收敛成方案、尽�
 
 命令也会出现在 Web 输入框的 `/` 菜单里，所以在对话中直接敲更顺手——进出都不必离开输入框。
 
+### 模式下拉框（Agent 预设）
+
+输入框上方的模式下拉框——和「标准模式 / PTC 模式 / 极简模式 / 创造模式」同一处——里也有一条**讨论模式**。那是 DSH 的 **Agent 预设**：一条预设定义的是一整个会话的插件组装，所以它的语义和 `/discuss` 不完全一样：
+
+| | 模式下拉框 | `/discuss`、侧边栏面板 |
+|---|---|---|
+| 作用对象 | 新会话（选的是"这条会话用什么组装"） | 当前会话 |
+| 生效时机 | 一进去就在讨论模式里，不用先敲命令 | 敲下去那一刻 |
+| 能否改主意 | 会话一旦开始就不能换预设（DSH 拒绝给已开始的会话换组装） | 随时进、随时出 |
+| 退出之后 | 就是完整的标准会话——组装本来就是标准模式那套工具面 | 同左 |
+
+所以它是**入口**，不是第二套状态机：退出仍然只有你能发起，`/discuss off` 与面板按钮在这条会话里照常管用。
+
+这条预设的组装是**标准模式工具面的快照**（`presets/discuss.patch.yml`），理由就是上表最后一行——出讨论模式之后你还得能干活。DSH 没有"引用另一条预设"的写法，所以那份清单是抄来的；升级 DSH 之后想让两边一致，就照安装里那份 `presets/standard.patch.yml` 重抄一遍（`tools/asar-extract.mjs` 能从 `app.asar` 里把它读出来）。
+
+### 收敛时拿到什么
+
+讨论到头了，它会默认交给你两样东西：一版 **MVP 草案**（做什么、不做什么、最大风险在哪），以及一段**交接 prompt**——单独一个代码块，可以直接粘进一个全新的会话。新会话里的执行者看不到你们说过的任何一句话，所以那段 prompt 要求自足：目标与验收、范围、已经定下的决定、已知的坑、从哪下手。
+
+这是刻意的分工：**讨论留在这里，动手去那边做**。讨论模式的价值在于判断没有被"顺手开始实现"冲掉；把结论写成一段能带走的东西，比让同一个会话继续跑下去更贴近这个目的——没有它，讨论的产物就只是聊天记录。
+
 ## 为什么这样设计
 
 ### 退出权不对称 —— 这是要害
@@ -69,11 +90,13 @@ plan mode 让**模型**调用 `exit_plan_mode` 来结束规划。它仍然是一
 
 ### 状态从会话日志折叠，而不是另存一份
 
-模式状态是一个 `sessionProjections` 单元，从 `/discuss` 命令自己的 `command/run` / `command/done` 记录里折叠出来。这带来三个白拿的好处：**会话恢复、fork、重放**都能自动还原状态。
+模式状态是一个 `sessionProjections` 单元，从两处日志折叠出来：`/discuss` 命令自己的 `command/run` / `command/done` 记录，以及会话**一开始就记着**的 `agentPreset`（表头字段与 `agent-preset/selected` 事件）。这带来三个白拿的好处：**会话恢复、fork、重放**都能自动还原状态。
 
 这也是必须的做法：DSH 不允许插件 append 自定义类型的事件——不认识该类型的读取方会拒绝重新打开会话。
 
-侧边栏面板读的就是这个投影的 `wire.view`，并**通过执行同一条命令**来改变它，所以界面不可能和日志脱节。
+两个入口在折叠时是**有先后**的，不是并列的：只要有一次 `/discuss` 跑完并落进日志，之后这条会话就听那个决定——否则在预设会话里敲 `/discuss off` 会被预设当场撤销。在那之前，会话的预设说了算，所以预设入口不需要任何命令就生效。
+
+侧边栏面板读的就是这个投影的 `wire.view`，并**通过执行同一条命令**来改变它，所以界面不可能和日志脱节——预设入口也是同一个 `view`，面板显示的"已开启"和你看到的一致。
 
 ## 配置
 
@@ -91,6 +114,7 @@ plan mode 让**模型**调用 `exit_plan_mode` 来结束规划。它仍然是一
 | `section` | 内置中文策略文本 | 讨论模式激活时渲染为 `discuss:policy` 提示词段落的内容 |
 | `denial` | 内置中文拒绝语 | 工具被拒绝时返回给模型的理由；`{tool}` 会替换为工具名 |
 | `blockedTools` | 见上文清单 | 被拒绝的工具；精确名，或以 `*` 结尾表示前缀匹配（如 `agent_teams_*`） |
+| `presetId` | `discuss` | 哪条 Agent 预设的会话一进去就在讨论模式里；写 `null` 关掉这个入口，只留 `/discuss` |
 
 未知的配置键会在激活时报错，而不是被静默忽略——`cordis.patch.yml` 里的笔误会立刻暴露。
 
@@ -98,10 +122,10 @@ plan mode 让**模型**调用 `exit_plan_mode` 来结束规划。它仍然是一
 
 ## 安装
 
-本包是一个 bundle（`package.json` 里的 `dsh.bundle.patch` 指向 `cordis.patch.yml`），安装它就会自动激活，无需手工编辑 profile：
+本包是一个 bundle（`package.json` 里的 `dsh.bundle.patch` 指向两个补丁层：`cordis.patch.yml` 挂插件行，`presets/discuss.patch.yml` 声明那条 Agent 预设），安装它就会自动激活，无需手工编辑 profile：
 
 ```powershell
-& 'D:\DSHD\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'D:\OneDrive\Desktop\Code\dsh\pro\dsh-discuss-mode'
+& 'D:\DSHD\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'D:\OneDrive\Desktop\Code\dsh\dsh-discuss-mode'
 ```
 
 装完需要**完全退出并重启 DeepSeek Harness**。两个原因：本机正在运行的进程早于这次安装；而宿主侧与浏览器侧的新模块都需要在启动时重新组装。
@@ -114,18 +138,23 @@ plan mode 让**模型**调用 `exit_plan_mode` 来结束规划。它仍然是一
 - **子代理在模式激活时被拒绝启动**，因为子代理不在本 guard 的管辖范围内——它们的工具调用属于另一个 agent 会话。堵住入口比事后追溯可靠。
 - **讨论模式与 plan mode 可以同时激活**，此时两段策略文本都会渲染（顺序为 500 的 `plan:policy`，然后是 550 的 `discuss:policy`）。实际使用中你不会想同时开两个。
 - **面板的按钮切换的是"当前显示的会话"**，判定方式是 `retainedBy.mainView > 0`——与 DSH 自带的 Workspace、Open-in-app 插件用的是同一个办法。没有打开会话时按钮禁用。
+- **模式下拉框那条预设只对新会话生效。** DSH 的 Agent 预设是会话级的：空白会话可以换，开过一轮之后宿主直接拒绝（`agent-preset/locked`）。所以"当前会话进讨论模式"永远走 `/discuss` 或面板，下拉框只负责开一条新的。
+- **预设里那份工具面是快照，不是引用。** 升级 DSH 后标准模式可能多出新工具，讨论模式预设里那份不会自己跟着长——需要时照 `presets/standard.patch.yml` 重抄。宿主没有"预设继承另一条预设"的写法，这是唯一的选择。
+- **预设的 id 是可配置的**（`presetId`，默认 `discuss`）：只装插件、不装这条预设的部署完全不受影响——没有哪条会话的 `agentPreset` 会等于它，模式照旧只由 `/discuss` 开关。
 - **不强制"必须讨论 N 轮"**：那不是约束能解决的问题，只会制造噪音。这个模式只保证两件事——模型没法自己出去，也没法动手。
 
 ## 实现速览
 
-四文件 bundle，**没有构建步骤**——客户端是手写的普通 JS。
+没有构建步骤：两个手写的普通 JS（宿主半 + 浏览器半）、两层补丁（插件行 + Agent 预设声明）、图标与两份 locale。
 
 | 关注点 | 机制 |
 |---|---|
 | 提示词段落 | `ctx.systemPrompt.section({ name: 'discuss:policy', order: 550 })` |
 | 工具拒绝 | `ctx.tools.guard(exec => string \| undefined)`，按会话状态条件判断 |
 | 斜杠命令 | `ctx.commands.register({ name: 'discuss', input: { hint: '[off\|message]', attachments: true } })` |
-| 状态 | `ctx.sessionProjections.register({ key: 'discuss', apply, wire })` |
+| 状态 | `ctx.sessionProjections.register({ key: 'discuss', apply, wire })`，`stateVersion: 2` |
+| 预设入口 | `package.json` 的 `dsh.bundle.patch` 是**有序数组**：`cordis.patch.yml` 之后追一层 `presets/discuss.patch.yml`，后者插一行 `@deepseek-ai/dsh-agent-preset`（`config.id: discuss`） |
+| 预设会话的默认状态 | 投影 `init(header)` 读表头的 `agentPreset`，`apply` 再折叠 `agent-preset/selected`；一旦有 `/discuss` 的 settled 决定，决定优先于预设 |
 | 侧边栏入口 | `ctx.slots.inject('sidebar.panellist', ...)`，`order: 20` |
 | 面板页面 | `ctx.slots.inject('main', ...)`，keyed，key 同为 `discuss-mode` |
 | 面板 → 宿主 | `ctx.remote.commands.execute(sessionId, '/discuss' \| '/discuss off', [])` |
@@ -150,10 +179,18 @@ powershell -ExecutionPolicy Bypass -File tools\push-via-api.ps1
 
 ## 验证
 
-`test/verify.mjs` 是随附的隔离测试：给 `@deepseek-ai/dsh-llm` 打桩后真实导入宿主侧代码，用假 ctx 跑通 `apply()` 的接线，并检查状态机、配置校验、工具匹配器、命令分支、包清单与客户端契约（含**两半策略文本必须逐字相同**的一致性断言）。
+`test/verify.mjs` 是随附的隔离测试：给 `@deepseek-ai/dsh-llm` 打桩后真实导入宿主侧代码，用假 ctx 跑通 `apply()` 的接线，并检查状态机（两个入口的先后、`/discuss off` 不会被预设撤销）、配置校验、工具匹配器、命令分支、两层补丁的清单与形状、客户端契约（含**两半策略文本必须逐字相同**的一致性断言）。
 
 ```powershell
 node test/verify.mjs
 ```
 
 不需要安装任何依赖——桩模块由脚本自己生成在 `test/.sandbox/`（已 gitignore）。
+
+`tools/asar-extract.mjs` 是查**装好的那份 DSH**用的：仓库旁边的参考检出往往落后于安装版本（这次的参考是 0.1.1-rc.2，装的是 0.2.0-rc.2，预设机制整个换过），而 `presets/standard.patch.yml`、`dsh-agent-preset-registry` 的实现都躺在 `app.asar` 里。它只读不写：
+
+```powershell
+node tools/asar-extract.mjs 'D:\DSHD\resources\app.asar' list 'dsh-agent-preset'
+node tools/asar-extract.mjs 'D:\DSHD\resources\app.asar' read 'dsh/node_modules/@deepseek-ai/dsh-web-app/presets/standard.patch.yml'
+node tools/asar-extract.mjs 'D:\DSHD\resources\app.asar' dump <路径> 落地文件
+```

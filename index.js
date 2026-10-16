@@ -30,7 +30,13 @@
  * the `/discuss` command's own `command/run` / `command/done` pair, which is
  * the sanctioned way to keep plugin state log-derived: a plugin must not append
  * a session event with a new `type`, because a reader that does not know it
- * would refuse to reopen the session.
+ * would refuse to reopen the session. It folds the session header's
+ * `agentPreset` and the registry's own `agent-preset/selected` events the same
+ * way, because the mode has a second entrance: starting a session on the
+ * `discuss` Agent preset this bundle ships (see `presets/discuss.patch.yml`).
+ * A session that never ran `/discuss` takes the mode from its preset; one that
+ * has run it takes the mode from that decision, so `/discuss off` inside a
+ * preset session is a real exit rather than a momentary one.
  *
  * The bundle deliberately imports one first-party package and nothing else, so
  * that loading it cannot fail on a third-party resolution. The projection's
@@ -47,6 +53,17 @@ const PROJECTION_KEY = "discuss";
 
 /** The slash command that enters and leaves the mode. */
 const COMMAND_NAME = "discuss";
+
+/**
+ * Agent preset whose sessions start in the mode, overridable through
+ * `config.presetId`.
+ *
+ * This bundle also ships that preset (`presets/discuss.patch.yml`), which is why
+ * the id doubles as the command name. Nothing here requires the preset to exist:
+ * a deployment that mounts only the plugin row simply never takes this entrance
+ * and keeps the `/discuss` toggle.
+ */
+const DEFAULT_PRESET_ID = "discuss";
 
 /**
  * Prompt-section order. `plan:policy` occupies 500 and `team:policy` 600, so a
@@ -100,7 +117,19 @@ const DEFAULT_SECTION = `你现在处于「讨论模式」。这是一场和资�
 - 明确不做的是这些
 - 最大的风险是 X，我建议先验证它
 
-然后停下来等用户。他可能继续抠细节，也可能就此收工——决定权在他手上，你无法自己结束这个模式。`;
+然后**默认再交出一段交接 prompt**——单独成段、用围栏代码块包起来，可以直接粘进一个全新的会话。
+
+新会话里的执行者看不到这里说过的任何一句话，所以这段 prompt 必须自足：
+
+- **目标与验收**：做完算什么
+- **范围**：先做哪些，明确不做哪些
+- **已经定下的决定**：为什么是这个方案，被否掉的备选是什么
+- **已知的坑**：必须先验证的风险、要绕开的错误路子
+- **起点**：从哪个文件或模块下手，现成的能力有哪些
+
+写成执行者可以照着做的样子，而不是讨论纪要。
+
+交完之后停下来等用户。他可能继续抠细节，也可能拿着这段 prompt 到新会话里开工——决定权在他手上，你无法自己结束这个模式。`;
 
 /** Denial text handed back to the model; `{tool}` is replaced with the tool name. */
 const DEFAULT_DENIAL = `讨论模式正在生效，"{tool}" 不可用：这个模式里不写文件、不改文件、不执行命令，也不委派他人去做。
@@ -143,7 +172,14 @@ const DEFAULT_BLOCKED_TOOLS = [
 ];
 
 /** Config keys the row may set; anything else fails at activation. */
-const KNOWN_CONFIG_KEYS = ["section", "denial", "blockedTools"];
+const KNOWN_CONFIG_KEYS = ["section", "denial", "blockedTools", "presetId"];
+
+/**
+ * Preset ids DSH accepts, mirrored from the registry's own rule: the id becomes
+ * a path segment there, and a session header carrying anything else can never
+ * match a mounted preset, so accepting it here would only hide a typo.
+ */
+const PRESET_ID = /^[a-z0-9][a-z0-9-]*$/;
 
 /**
  * Build a `.parse`-only schema. The session-projection contract consumes a
@@ -168,8 +204,11 @@ const discussStateSchema = parseOnly((value) => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new TypeError("discuss projection state must be an object");
   }
-  if (typeof value.active !== "boolean") {
-    throw new TypeError("discuss projection state.active must be a boolean");
+  if (typeof value.active !== "boolean" || typeof value.decided !== "boolean") {
+    throw new TypeError("discuss projection state.active and state.decided must be booleans");
+  }
+  if (value.presetId !== null && typeof value.presetId !== "string") {
+    throw new TypeError("discuss projection state.presetId must be null or a string");
   }
   if (value.running !== null) {
     const running = value.running;
@@ -190,52 +229,99 @@ const discussViewSchema = parseOnly((value) => {
 });
 
 /**
- * Projection of the `/discuss` command's logged runs into the mode's state.
+ * Whether the mode is on for one fold state.
+ *
+ * The two entrances are ordered, not merged: once a `/discuss` run has settled,
+ * the user's decision is the answer for the rest of the session — including a
+ * `/discuss off` inside a preset session, which would otherwise be undone by the
+ * preset on the next read. Until then the session's preset is the answer, so a
+ * `discuss` session is in the mode from its first event without any command
+ * having run.
+ *
+ * @param state - the folded state, or `undefined` when the unit is not registered.
+ * @param presetId - the configured preset id, or `null` when this entrance is off.
+ * @returns whether discussion mode is active.
+ */
+function isModeActive(state, presetId) {
+  if (state === undefined) return false;
+  if (state.decided === true) return state.active === true;
+  return presetId !== null && state.presetId === presetId;
+}
+
+/**
+ * Projection of the mode's two entrances into one state.
  *
  * `command/run` is appended before the handler runs and `command/done` after it
  * settles, so a successful run is the mode change. A failed run leaves the mode
  * untouched. `recordInput` must stay at its default (`true`) for `data.args` to
  * be present — without it the unit cannot tell `/discuss` from `/discuss off`.
  *
+ * The preset entrance is folded from what the session already records: the
+ * header's `agentPreset` (DSH validates it there, and the registry's own
+ * reconstruction reads it the same way) and the `agent-preset/selected` events a
+ * blank session's picker appends. Nothing here queries the registry, so the
+ * fold stays a pure function of the log and survives resume, fork, and replay.
+ *
  * `apply` is pure and synchronous and must return the *same reference* for
  * events it ignores; the projection cache relies on that identity to skip
  * downstream work.
+ *
+ * @param presetId - the preset whose sessions start in the mode, or `null`.
+ * @returns the projection definition to register.
  */
-const discussProjectionDefinition = {
-  key: PROJECTION_KEY,
-  stateVersion: 1,
-  stateSchema: discussStateSchema,
-  init: () => ({ active: false, running: null }),
-  apply: (state, event) => {
-    if (event.type === "command/run" && event.data.name === COMMAND_NAME) {
-      if (event.data.args === undefined) return state;
-      return {
-        ...state,
-        running: {
-          commandId: event.data.commandId,
-          wanted: event.data.args.trim() !== "off",
-        },
-      };
-    }
-    if (
-      event.type === "command/done" &&
-      state.running !== null &&
-      event.data.commandId === state.running.commandId
-    ) {
-      const wanted = event.data.kind === "success" ? state.running.wanted : null;
-      return {
-        ...state,
-        active: wanted === null ? state.active : wanted,
-        running: null,
-      };
-    }
-    return state;
-  },
-  wire: {
-    viewSchema: discussViewSchema,
-    view: (state) => ({ active: state.active }),
-  },
-};
+function createDiscussProjection(presetId) {
+  return {
+    key: PROJECTION_KEY,
+    stateVersion: 2,
+    stateSchema: discussStateSchema,
+    init: (header) => ({
+      active: false,
+      decided: false,
+      presetId: typeof header?.agentPreset === "string" ? header.agentPreset : null,
+      running: null,
+    }),
+    apply: (state, event) => {
+      if (event.type === "agent-preset/selected") {
+        const chosen = event.data?.agentPreset;
+        if (typeof chosen !== "string" || chosen === state.presetId) return state;
+        return { ...state, presetId: chosen };
+      }
+      if (event.type === "command/run" && event.data.name === COMMAND_NAME) {
+        if (event.data.args === undefined) return state;
+        return {
+          ...state,
+          running: {
+            commandId: event.data.commandId,
+            wanted: event.data.args.trim() !== "off",
+          },
+        };
+      }
+      if (
+        event.type === "command/done" &&
+        state.running !== null &&
+        event.data.commandId === state.running.commandId
+      ) {
+        const wanted = event.data.kind === "success" ? state.running.wanted : null;
+        return {
+          ...state,
+          active: wanted === null ? state.active : wanted,
+          // A run that settled — successfully or not — is a decision the user
+          // made, so the preset stops speaking for this session.
+          decided: wanted === null ? state.decided : true,
+          running: null,
+        };
+      }
+      return state;
+    },
+    wire: {
+      viewSchema: discussViewSchema,
+      view: (state) => ({ active: isModeActive(state, presetId) }),
+    },
+  };
+}
+
+/** The definition registered under the shipped defaults; also the shape tests read. */
+const discussProjectionDefinition = createDiscussProjection(DEFAULT_PRESET_ID);
 
 /**
  * Validate and detach the row's config. A missing, blank, wrongly typed, or
@@ -273,7 +359,17 @@ function resolveConfig(config) {
     throw new TypeError("dsh-discuss-mode `blockedTools` must be an array of non-empty strings");
   }
 
-  return { section, denial, blockedTools };
+  // `null` (or an empty string) turns the preset entrance off without touching
+  // the command: the plugin can then be mounted on its own, with no preset
+  // shipped beside it.
+  const presetId = raw.presetId === undefined ? DEFAULT_PRESET_ID : (raw.presetId === "" ? null : raw.presetId);
+  if (presetId !== null && (typeof presetId !== "string" || !PRESET_ID.test(presetId))) {
+    throw new TypeError(
+      "dsh-discuss-mode `presetId` must be a preset id ([a-z0-9][a-z0-9-]*), or null to disable the preset entrance",
+    );
+  }
+
+  return { section, denial, blockedTools, presetId };
 }
 
 /**
@@ -301,11 +397,11 @@ function compileToolMatcher(patterns) {
  *
  * @param ctx - plugin context carrying `sessionProjections`.
  * @param session - the session to read.
+ * @param presetId - the configured preset entrance.
  * @returns whether discussion mode is active for that session.
  */
-function isActive(ctx, session) {
-  const state = ctx.sessionProjections.stateOf(session, PROJECTION_KEY);
-  return state !== undefined && state.active === true;
+function isActive(ctx, session, presetId) {
+  return isModeActive(ctx.sessionProjections.stateOf(session, PROJECTION_KEY), presetId);
 }
 
 export const name = "discuss-mode";
@@ -332,6 +428,7 @@ export const inject = ["tools", "systemPrompt", "sessionProjections"];
 export function apply(ctx, config) {
   const resolved = resolveConfig(config);
   const blocked = compileToolMatcher(resolved.blockedTools);
+  const presetId = resolved.presetId;
 
   ctx.effect(
     () =>
@@ -339,13 +436,15 @@ export function apply(ctx, config) {
         name: SECTION_NAME,
         order: SECTION_ORDER,
         text: (context) =>
-          context.agent !== undefined && isActive(ctx, context.agent.session) ? resolved.section : "",
+          context.agent !== undefined && isActive(ctx, context.agent.session, presetId)
+            ? resolved.section
+            : "",
       }),
     "dsh-discuss-mode: policy section",
   );
 
   ctx.effect(
-    () => ctx.sessionProjections.register(discussProjectionDefinition),
+    () => ctx.sessionProjections.register(createDiscussProjection(presetId)),
     "dsh-discuss-mode: state projection",
   );
 
@@ -360,7 +459,7 @@ export function apply(ctx, config) {
         const agent = exec.agent;
         if (agent === undefined) return undefined;
         if (!blocked(exec.name)) return undefined;
-        if (!isActive(ctx, agent.session)) return undefined;
+        if (!isActive(ctx, agent.session, presetId)) return undefined;
         return resolved.denial.replaceAll("{tool}", exec.name);
       }),
     "dsh-discuss-mode: tool guard",
@@ -383,7 +482,7 @@ export function apply(ctx, config) {
             if (message === "off") {
               return {
                 kind: "success",
-                text: isActive(ctx, agent.session)
+                text: isActive(ctx, agent.session, presetId)
                   ? "讨论模式已关闭。"
                   : "讨论模式本来就是关闭的。",
               };
@@ -411,4 +510,12 @@ export function apply(ctx, config) {
   });
 }
 
-export { discussProjectionDefinition, resolveConfig, compileToolMatcher, DEFAULT_BLOCKED_TOOLS };
+export {
+  discussProjectionDefinition,
+  createDiscussProjection,
+  isModeActive,
+  resolveConfig,
+  compileToolMatcher,
+  DEFAULT_BLOCKED_TOOLS,
+  DEFAULT_PRESET_ID,
+};

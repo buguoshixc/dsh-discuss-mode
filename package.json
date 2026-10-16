@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Discussion mode for DeepSeek Harness: the agent consults as a domain expert before development, acting tools are denied while the mode is active, and only the user can leave it.",
+  "description": "Discussion mode for DeepSeek Harness: the agent consults as a domain expert before development, acting tools are denied while the mode is active, only the user can leave it, and it is selectable as an Agent preset beside 标准模式.",
   "keywords": [
     "deepseek-harness",
     "dsh",
@@ -20,12 +20,14 @@
     "./client": "./client.js",
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml",
+    "./presets/*.patch.yml": "./presets/*.patch.yml",
     "./locale/*.json": "./locale/*.json"
   },
   "files": [
     "index.js",
     "client.js",
     "cordis.patch.yml",
+    "presets/*.patch.yml",
     "icon.svg",
     "locale/*.json",
     "README.md"
@@ -46,7 +48,10 @@
   },
   "dsh": {
     "bundle": {
-      "patch": "./cordis.patch.yml"
+      "patch": [
+        "./cordis.patch.yml",
+        "./presets/discuss.patch.yml"
+      ]
     },
     "client": {
       "platform": "web",
