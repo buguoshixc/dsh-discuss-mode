@@ -136,6 +136,18 @@ plan mode 让**模型**调用 `exit_plan_mode` 来结束规划。它仍然是一
 
 参考实现：`@deepseek-ai/dsh-plan-mode`（同体系的姊妹模式）、`@deepseek-ai/dsh-persona`（`ctx.effect` 包装的写法）、`dsh-mobile-remote`（侧边栏面板 + `sidebar.panellist`）。
 
+## 推送（网络受限时）
+
+本机到 `github.com:443`——也就是 `git push` 用的那个端点——不稳定，实测会连接超时或被重置；而 `gh` 走 api.github.com 完全正常。所以仓库带了一个走 Git Data API 的推送脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\push-via-api.ps1
+```
+
+它**不是复制**：git 的对象 id 是内容的纯函数，上传同样的 blob / tree / 作者 / 提交者 / 时间 / 提交信息必然得到同一个 SHA。脚本在每一步都比对 git 自己的答案，**对不上就拒绝移动 ref**——所以本地和远端不会悄悄分叉，`git status` 保持准确，等网络恢复后 `git push` 也没有多余的事可做。
+
+前提是远端仓库已有至少一个提交（GitHub 对完全空的仓库会以 `409 Git Repository is empty` 拒绝创建 blob/tree）。
+
 ## 验证
 
 `test/verify.mjs` 是随附的隔离测试：给 `@deepseek-ai/dsh-llm` 打桩后真实导入宿主侧代码，用假 ctx 跑通 `apply()` 的接线，并检查状态机、配置校验、工具匹配器、命令分支、包清单与客户端契约（含**两半策略文本必须逐字相同**的一致性断言）。
