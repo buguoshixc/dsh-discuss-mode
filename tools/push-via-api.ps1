@@ -35,7 +35,10 @@ param(
   [string]$Remote = 'origin'
 )
 
-$ErrorActionPreference = 'Stop'
+# Native commands write progress and warnings to stderr routinely, and under
+# `Stop` Windows PowerShell would turn any of that into a terminating error.
+# Failures are detected through $LASTEXITCODE instead.
+$ErrorActionPreference = 'Continue'
 
 function Fail([string]$Message) {
   Write-Host "error: $Message" -ForegroundColor Red
@@ -43,18 +46,40 @@ function Fail([string]$Message) {
 }
 
 # ------------------------------------------------------------- discovery ---
-$root = (git rev-parse --show-toplevel 2>$null | Select-Object -First 1)
-if ($LASTEXITCODE -ne 0 -or -not $root) { Fail 'not inside a git repository' }
-$root = $root.Trim()
-Set-Location $root
+# `Set-Location` moves PowerShell's own location but does not reliably update
+# the process working directory that native children such as `git` inherit, so
+# both are set.
+function Set-WorkingDirectory([string]$Path) {
+  $resolved = (Resolve-Path -LiteralPath $Path).Path
+  Set-Location -LiteralPath $resolved
+  [System.IO.Directory]::SetCurrentDirectory($resolved)
+}
+
+function Find-RepoRoot {
+  $found = [string](git rev-parse --show-toplevel 2>$null)
+  $found = $found.Trim()
+  if ($found -ne '') { return $found }
+  return $null
+}
+
+$root = Find-RepoRoot
+if (-not $root -and $PSScriptRoot) {
+  # Fall back to the repository this script ships in, so it works from anywhere.
+  try { Set-WorkingDirectory (Join-Path $PSScriptRoot '..') } catch { }
+  $root = Find-RepoRoot
+}
+if (-not $root) { Fail 'not inside a git repository (run from the repository, or use the copy in its tools/ directory)' }
+Set-WorkingDirectory $root
 
 if ($Branch -eq '') { $Branch = (git rev-parse --abbrev-ref HEAD).Trim() }
 if ($Branch -eq 'HEAD') { Fail 'detached HEAD; pass -Branch explicitly' }
 if ($Branch -notmatch '^[A-Za-z0-9._/-]+$') { Fail "refusing to use suspicious branch name '$Branch'" }
 
-$remoteUrl = (git config "remote.$Remote.url" 2>$null | Select-Object -First 1)
-if ($LASTEXITCODE -ne 0 -or -not $remoteUrl) { Fail "remote '$Remote' has no URL" }
+# `${Remote}` needs the braces: "$Remote.url" would be parsed as a property
+# access on $Remote and silently collapse the key to "remote.".
+$remoteUrl = [string](git config "remote.${Remote}.url" 2>$null)
 $remoteUrl = $remoteUrl.Trim()
+if ($remoteUrl -eq '') { Fail "remote '$Remote' has no URL" }
 if ($remoteUrl -notmatch 'github\.com[:/](?<owner>[^/]+)/(?<repo>[^/]+?)(\.git)?$') {
   Fail "cannot derive owner/repo from remote URL '$remoteUrl'"
 }
@@ -69,23 +94,59 @@ $head = (git rev-parse $Branch).Trim()
 $script:blobCache = @{}
 $script:bodyFile = Join-Path $root '.git\api-push-body.json'
 $script:blobFile = Join-Path $root '.git\api-push-blob.bin'
+$script:commitFile = Join-Path $root '.git\api-push-commit.txt'
+$script:outFile = Join-Path $root '.git\api-push-out.txt'
+$script:errFile = Join-Path $root '.git\api-push-err.txt'
 
 function Invoke-Api {
-  param([string]$Method, [string]$Path, $Body = $null)
+  param([string]$Method, [string]$Path, $Body = $null, [switch]$Quiet)
+
   if ($null -ne $Body) {
     [System.IO.File]::WriteAllText($script:bodyFile, ($Body | ConvertTo-Json -Depth 10 -Compress))
-    $out = gh api -X $Method $Path --input $script:bodyFile 2>&1
-  } else {
-    $out = gh api -X $Method $Path 2>&1
   }
-  $code = $LASTEXITCODE
-  Remove-Item $script:bodyFile -Force -ErrorAction SilentlyContinue
-  if ($code -ne 0) { return $null }
-  return ($out | Out-String | ConvertFrom-Json)
+
+  # This network drops roughly half of all api.github.com calls during a bad
+  # spell, so the retry budget is deliberately generous — at a 40% success rate,
+  # ten independent attempts still land about 99% of the time.
+  $attempts = 10
+  for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+    # Capture through `cmd` redirection and decode explicitly. Merging stderr
+    # into the PowerShell stream would let Windows PowerShell render a native
+    # command's stderr as a script-level error, and silencing that preference
+    # discards the message entirely — which is the one thing worth keeping.
+    $command = 'gh api -X ' + $Method + ' "' + $Path + '"'
+    if ($null -ne $Body) { $command = $command + ' --input "' + $script:bodyFile + '"' }
+    & cmd /c ($command + ' > "' + $script:outFile + '" 2> "' + $script:errFile + '"')
+    $code = $LASTEXITCODE
+
+    $stdout = ''
+    $stderr = ''
+    if (Test-Path $script:outFile) { $stdout = [System.IO.File]::ReadAllText($script:outFile, [System.Text.Encoding]::UTF8) }
+    if (Test-Path $script:errFile) { $stderr = [System.IO.File]::ReadAllText($script:errFile, [System.Text.Encoding]::UTF8) }
+    $text = ($stdout + "`n" + $stderr).Trim()
+
+    if ($code -eq 0) { return ($text | ConvertFrom-Json) }
+
+    # Every write this script makes is idempotent — identical content yields an
+    # identical object id — so a retry cannot duplicate anything. Only the
+    # network deserves one; a 404 or 422 is the API's answer.
+    $transient = $text -match 'timeout|timed out|connection|reset|EOF|TLS|refused|50[0-9]'
+    if (-not $transient -or $attempt -eq $attempts) {
+      if (-not $Quiet) {
+        Write-Host "  gh api $Method $Path failed (exit $code): $text" -ForegroundColor Yellow
+      }
+      return $null
+    }
+
+    $wait = [Math]::Min(2 * $attempt, 10)
+    Write-Host "  transient failure on $Method $Path (attempt $attempt/$attempts); retrying in ${wait}s" -ForegroundColor DarkGray
+    Start-Sleep -Seconds $wait
+  }
+  return $null
 }
 
 function Test-RemoteCommit([string]$Sha) {
-  return ($null -ne (Invoke-Api -Method GET -Path "repos/$slug/git/commits/$Sha"))
+  return ($null -ne (Invoke-Api -Method GET -Path "repos/$slug/git/commits/$Sha" -Quiet))
 }
 
 function ConvertTo-Iso8601([string]$UnixSeconds, [string]$Zone) {
@@ -98,14 +159,28 @@ function ConvertTo-Iso8601([string]$UnixSeconds, [string]$Zone) {
 }
 
 # Read one commit object and split it into the pieces the API wants.
+#
+# The body is taken as raw bytes through `cmd` redirection, not from
+# PowerShell's line-split capture of native output: that capture drops the
+# trailing newline, which changes the message and therefore the commit id.
 function Read-LocalCommit([string]$Sha) {
-  $lines = @(git cat-file commit $Sha)
-  if ($LASTEXITCODE -ne 0) { Fail "cannot read commit $Sha" }
+  & cmd /c ('git cat-file commit ' + $Sha + ' > "' + $script:commitFile + '"')
+  $size = 0
+  if (Test-Path $script:commitFile) { $size = (Get-Item $script:commitFile).Length }
+  if ($size -eq 0) {
+    Remove-Item $script:commitFile -Force -ErrorAction SilentlyContinue
+    Fail "cannot read commit $Sha"
+  }
 
-  $separator = [array]::IndexOf($lines, '')
+  $text = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($script:commitFile))
+  Remove-Item $script:commitFile -Force
+
+  $separator = $text.IndexOf("`n`n")
   if ($separator -lt 0) { Fail "commit $Sha has no header/body separator" }
 
-  $header = @($lines[0..($separator - 1)])
+  $header = @($text.Substring(0, $separator) -split "`n")
+  $message = $text.Substring($separator + 2)
+
   $tree = (($header | Where-Object { $_ -like 'tree *' } | Select-Object -First 1) -replace '^tree ', '')
   $parents = @($header | Where-Object { $_ -like 'parent *' } | ForEach-Object { $_ -replace '^parent ', '' })
 
@@ -121,10 +196,6 @@ function Read-LocalCommit([string]$Sha) {
       date  = (ConvertTo-Iso8601 $Matches.ts $Matches.tz)
     }
   }
-
-  # Everything after the separator, rejoined verbatim, so a trailing newline
-  # survives and the resulting object id matches git's.
-  $message = ($lines[($separator + 1)..($lines.Count - 1)] -join "`n")
 
   return @{
     sha       = $Sha
