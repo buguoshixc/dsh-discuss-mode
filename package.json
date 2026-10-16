@@ -3,7 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Discussion mode: a peer-thinking stance the agent enters before development, with acting tools denied and the exit owned by the human.",
+  "description": "Discussion mode for DeepSeek Harness: the agent consults as a domain expert before development, acting tools are denied while the mode is active, and only the user can leave it.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "discussion-mode",
+    "plan-mode",
+    "agent-collaboration"
+  ],
   "license": "MIT",
   "icon": "./icon.svg",
   "exports": {
