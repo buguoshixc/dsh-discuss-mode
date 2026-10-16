@@ -1,0 +1,20 @@
+# Discussion mode — a sibling collaboration stance to plan mode.
+#
+# The row mounts `dsh-discuss-mode`, which contributes three things while the
+# mode is active: a `discuss:policy` system-prompt section, a monotonic tool
+# guard that denies acting tools, and the `/discuss` command that the user (and
+# only the user) drives. State is folded from the session log, so it survives
+# resume and fork.
+#
+# Config is optional; the shipped defaults are the stance text and the tool
+# deny-list. To override them, restate the fields you keep — a patch replaces
+# the whole `config` object rather than merging into it:
+#
+#     - id: discuss-mode
+#       name: 'dsh-discuss-mode'
+#       config:
+#         blockedTools: ['write', 'edit', 'pwsh', 'bash']
+
+- insert:
+    - id: discuss-mode
+      name: 'dsh-discuss-mode'

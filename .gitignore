@@ -1,0 +1,10 @@
+# The verification sandbox: generated stubs plus a copy of index.js.
+test/.sandbox/
+
+# Nothing here is a dependency of the plugin itself; the bundle ships no
+# dependencies and the client half is hand-written.
+node_modules/
+
+*.log
+.DS_Store
+Thumbs.db

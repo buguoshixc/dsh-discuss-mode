@@ -1,0 +1,4 @@
+# Normalize to LF everywhere. The plugin is plain JS/JSON/YAML/Markdown with no
+# generated line endings, and forcing one form keeps diffs stable across the
+# Windows working copy and the repository.
+* text=auto eol=lf
