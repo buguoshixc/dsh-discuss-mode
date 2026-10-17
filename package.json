@@ -1,6 +1,6 @@
 {
   "name": "dsh-discuss-mode",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Discussion mode for DeepSeek Harness: the agent consults as a domain expert before development, acting tools are denied while the mode is active, only the user can leave it, and it is selectable as an Agent preset beside 标准模式.",
@@ -32,12 +32,16 @@
     "locale/*.json",
     "README.md"
   ],
+  "engines": {
+    "node": "^22.19.0 || >=24",
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
+  },
   "peerDependencies": {
-    "@deepseek-ai/dsh-commands": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-session-projection": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-system-prompt": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-tools": "0.2.0-rc.2"
+    "@deepseek-ai/dsh-commands": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session-projection": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-commands": { "optional": true },
@@ -47,6 +51,7 @@
     "@deepseek-ai/dsh-tools": { "optional": true }
   },
   "dsh": {
+    "manifestVersion": 1,
     "bundle": {
       "patch": [
         "./cordis.patch.yml",

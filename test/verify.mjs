@@ -8,9 +8,15 @@
  * `test/.sandbox/plugin.mjs`, so that stub resolves without touching the
  * package itself. The sandbox is disposable and git-ignored.
  *
+ * It also pins the manifest and the generated preset snapshot to the installed
+ * DSH v0.2.1-rc.2 contract, with no dependency on the installed build: set
+ * `DSH_APP_ASAR` to additionally run `tools/sync-preset.mjs --check` against
+ * the real `app.asar` (skipped silently when unset).
+ *
  * Run: node test/verify.mjs
  */
 
+import { spawnSync } from "node:child_process";
 import { mkdir, writeFile, copyFile, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -416,6 +422,41 @@ check(
   "manifest exports the preset layer",
   manifest.exports?.["./presets/*.patch.yml"] === "./presets/*.patch.yml",
 );
+// The 0.2.1 compatibility declaration: the preflight reads `engines.dsh` first and
+// rejects exact peer ranges that do not satisfy the runtime, so the release intent
+// has to be visible here rather than only in the peer pin.
+check(
+  "manifest version is a released 0.2.x",
+  typeof manifest.version === "string" && /^0\.2\.\d+$/.test(manifest.version),
+  `got ${String(manifest.version)}`,
+);
+check(
+  "manifest declares the Node engine range",
+  typeof manifest.engines?.node === "string" && manifest.engines.node.length > 0,
+  `got ${String(manifest.engines?.node)}`,
+);
+check(
+  "manifest requires DSH >=0.2.1-rc.2 <0.3.0",
+  typeof manifest.engines?.dsh === "string" &&
+    manifest.engines.dsh.startsWith(">=0.2.1-rc.2") &&
+    manifest.engines.dsh.trimEnd().endsWith("<0.3.0") &&
+    !manifest.engines.dsh.includes("workspace:"),
+  `got ${String(manifest.engines?.dsh)}`,
+);
+const dshPeers = Object.entries(manifest.peerDependencies ?? {}).filter(([name]) =>
+  name.startsWith("@deepseek-ai/dsh-"),
+);
+check("manifest keeps the five DSH peer packages", dshPeers.length === 5, `got ${dshPeers.length}`);
+check(
+  "every DSH peer dependency pins 0.2.1-rc.2",
+  dshPeers.every(([, range]) => range === "0.2.1-rc.2"),
+  dshPeers.map(([name, range]) => `${name}@${range}`).join(", "),
+);
+check(
+  "manifest declares the 0.2.1 manifest format",
+  manifest.dsh?.manifestVersion === 1,
+  `got ${String(manifest.dsh?.manifestVersion)}`,
+);
 const patch = await readFile(join(pkgDir, "cordis.patch.yml"), "utf8");
 check("patch inserts a row", /^-\s*insert:/m.test(patch));
 check("patch row names the package", patch.includes("name: 'dsh-discuss-mode'"));
@@ -442,6 +483,81 @@ check(
 );
 check("preset patch does not compose the mode row a second time", !presetPatch.includes("dsh-discuss-mode"));
 check("preset patch uses spaces, not tabs", !presetPatch.includes("\t"));
+// The generated region is the shipped 0.2.1 `standard` preset with only the
+// declaration identity rewritten; `tools/sync-preset.mjs` owns re-snapshotting it.
+const BEGIN_MARKER = "# --- BEGIN GENERATED PRESET (node tools/sync-preset.mjs) ---";
+const END_MARKER = "# --- END GENERATED PRESET ---";
+const presetLines = presetPatch.split("\n");
+const beginAt = presetPatch.indexOf(BEGIN_MARKER);
+const endAt = presetPatch.indexOf(END_MARKER);
+check(
+  "preset patch bounds its generated region with markers",
+  beginAt !== -1 && endAt !== -1 && beginAt < endAt,
+  `BEGIN at ${String(beginAt)}, END at ${String(endAt)}`,
+);
+check(
+  "the markers are whole comment lines",
+  presetLines.includes(BEGIN_MARKER) && presetLines.includes(END_MARKER),
+);
+check(
+  "the generated region is non-empty",
+  endAt > beginAt + BEGIN_MARKER.length + 1,
+  `${String(endAt - beginAt)} marker-region code units`,
+);
+check(
+  "preset patch ends after the END marker with exactly one newline",
+  presetPatch.endsWith(`${END_MARKER}\n`) && !presetPatch.endsWith("\n\n") && !presetPatch.includes("\r"),
+);
+check("the 0.2.1 snapshot resolves no {{cwd}}", !presetPatch.includes("{{cwd}}"));
+for (const name of [
+  "@deepseek-ai/dsh-time-context",
+  "@deepseek-ai/dsh-tool-schedule",
+  "@deepseek-ai/dsh-plugin-market/tools",
+]) {
+  check(`preset composes the 0.2.1 row ${name}`, presetPatch.includes(`name: '${name}'`));
+}
+for (const removed of [
+  "tool-ralph",
+  "tool-subagent-codex",
+  "tool-subagent-claude-code",
+  "backgroundMode",
+  "exit_plan_mode succeeds",
+]) {
+  check(`preset no longer carries ${removed}`, !presetPatch.includes(removed));
+}
+// `tools/sync-preset.mjs` is the re-snapshot command the preset provenance names;
+// it has to stay runnable without the installed DSH and take its archive by flag
+// or environment rather than a baked-in install path.
+let syncSource = null;
+try {
+  syncSource = await readFile(join(pkgDir, "tools", "sync-preset.mjs"), "utf8");
+} catch {
+  syncSource = null;
+}
+check("ships the preset sync tool", typeof syncSource === "string");
+check(
+  "the sync tool takes the archive from --asar / DSH_APP_ASAR, not a hardcoded path",
+  typeof syncSource === "string" &&
+    syncSource.includes("DSH_APP_ASAR") &&
+    syncSource.includes("--check") &&
+    !syncSource.includes("D:\\DSHD") &&
+    !syncSource.includes("D:/DSHD"),
+);
+const asarForSync = process.env.DSH_APP_ASAR;
+if (asarForSync === undefined || asarForSync.trim() === "") {
+  console.log("  skip tools/sync-preset.mjs --check (DSH_APP_ASAR is not set)");
+} else {
+  const sync = spawnSync(process.execPath, [join(pkgDir, "tools", "sync-preset.mjs"), "--check"], {
+    cwd: pkgDir,
+    env: { ...process.env, DSH_APP_ASAR: asarForSync },
+    encoding: "utf8",
+  });
+  check(
+    "the generated snapshot matches the installed DSH standard preset",
+    sync.status === 0,
+    `${String(sync.stderr ?? "").trim() || String(sync.stdout ?? "").trim()}`,
+  );
+}
 /**
  * The registry refuses a composition whose rows are not maps carrying a `name`
  * (`entryListProblem`, checked with the loader's own YAML dialect). The suite has
