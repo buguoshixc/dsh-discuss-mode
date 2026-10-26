@@ -1,6 +1,6 @@
 {
   "name": "dsh-discuss-mode",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "description": "Discussion mode for DeepSeek Harness: the agent consults as a domain expert before development, acting tools are denied while the mode is active, only the user can leave it, and it is selectable as an Agent preset beside 标准模式.",

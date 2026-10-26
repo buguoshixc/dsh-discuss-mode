@@ -641,6 +641,7 @@ check("the panel shows exactly what the agent is told", hostStance === clientSta
 check("both halves match the resolved default", clientStance === defaults.section);
 check("the stance asks for the handoff prompt", clientStance.includes("交接 prompt"));
 check("the stance says the handoff is for a new conversation", clientStance.includes("全新的会话"));
+check("the stance no longer delivers unconditionally", !clientStance.includes("默认再交出"));
 
 // ------------------------------------------------------------------ report ---
 console.log(`\n${"=".repeat(60)}`);
