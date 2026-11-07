@@ -42,17 +42,22 @@ DSH 里模型天然是任务导向的：它倾向于尽快收敛成方案、尽�
 
 所以它是**入口**，不是第二套状态机：退出仍然只有你能发起，`/discuss off` 与面板按钮在这条会话里照常管用。
 
-这条预设的组装是**标准模式工具面的快照**（`presets/discuss.patch.yml`），理由就是上表最后一行——出讨论模式之后你还得能干活。DSH 没有"引用另一条预设"的写法，所以那份清单是抄来的：它抄自安装里 `@deepseek-ai/dsh-web-app@0.2.1-rc.2` 的 `presets/standard.patch.yml`，夹在文件里的 BEGIN/END 生成标记之间。这次对齐还修掉一处会炸的差异——0.2.1 移除了 `{{cwd}}` 提示词变量，而旧快照里 persona 的 `suffix` 用了它，讨论模式的会话会因此连第一次请求都发不出去。
+这条预设的组装是**标准模式工具面的快照**（`presets/discuss.patch.yml`），理由就是上表最后一行——出讨论模式之后你还得能干活。DSH 没有"引用另一条预设"的写法，所以那份清单是抄来的：它抄自安装里 `@deepseek-ai/dsh-web-app@0.2.2-rc.1` 的 `presets/standard.patch.yml`，夹在文件里的 BEGIN/END 生成标记之间。上一轮 0.2.1 对齐时还修掉一处会炸的差异——0.2.1 移除了 `{{cwd}}` 提示词变量，而更早的快照里 persona 的 `suffix` 用了它，讨论模式的会话会因此连第一次请求都发不出去。
 
-升级 DSH 之后想让两边一致，重抄也是命令化的：
+升级 DSH 之后想让两边一致，重抄也是命令化的。工具认两种安装形态：桌面版从 `app.asar` 读，npm 安装则是普通文件。
 
 ```powershell
+# npm 安装：标准预设是普通文件
+$env:DSH_PRESET_FILE='C:\...\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai\dsh-web-app\presets\standard.patch.yml'
+node tools/sync-preset.mjs --file $env:DSH_PRESET_FILE          # 就地重写生成区
+node tools/sync-preset.mjs --check --file $env:DSH_PRESET_FILE  # 只比对：过期时 exit 1，一致时 exit 0
+
+# 桌面版：标准预设在 app.asar 里
 $env:DSH_APP_ASAR='D:\DSHD\resources\app.asar'
-node tools/sync-preset.mjs            # 就地重写生成区
-node tools/sync-preset.mjs --check    # 只比对：过期时 exit 1，一致时 exit 0
+node tools/sync-preset.mjs            # 等价于 --asar $env:DSH_APP_ASAR
 ```
 
-`--asar <path>` 也可以代替 `DSH_APP_ASAR`；工具只改写生成区，文件顶部的说明注释和生成标记保持原样。拿不准两边是否一致时先跑 `--check`。
+`--file <path>` / `--asar <path>` 也可以直接给；两个都给或都不给是用法错误（exit 2）。工具只改写生成区，文件顶部的说明注释和生成标记保持原样。拿不准两边是否一致时先跑 `--check`。
 
 ### 收敛时拿到什么
 
@@ -92,7 +97,7 @@ plan mode 让**模型**调用 `exit_plan_mode` 来结束规划。它仍然是一
 
 只靠提示词约束行为是不可靠的。模式激活时，一个**单调的** `ctx.tools.guard()` 会拒绝动手类工具，并把拒绝理由返回给模型：
 
-- **被拒绝**：`write`、`edit`、`pwsh`、`bash`、`subagent`、`subagent_fork`、`workflow`、`spawn_teammate`、`send_message`、`create_goal`、`update_goal`、`job_kill`、`schedule_*`、`agent_teams_*`、`team_task_*`
+- **被拒绝**：`write`、`edit`、`apply_patch`、`pwsh`、`bash`、`subagent`、`subagent_fork`、`workflow`、`spawn_teammate`、`send_message`、`create_goal`、`update_goal`、`job_kill`、`schedule_*`、`agent_teams_*`、`team_task_*`
 - **照常可用**：`read`、`glob`、`grep`、`read_image`、`web_search`、`web_fetch`、`ask_user_question`、`todo_write`、`skill`、各类只读的 list/status 工具
 
 只读探索是**故意保留**的：讨论已有项目时，策略要求它先读相关代码再开口。
@@ -117,7 +122,7 @@ plan mode 让**模型**调用 `exit_plan_mode` 来结束规划。它仍然是一
 - id: discuss-mode
   name: 'dsh-discuss-mode'
   config:
-    blockedTools: ['write', 'edit', 'pwsh', 'bash', 'subagent']
+    blockedTools: ['write', 'edit', 'apply_patch', 'pwsh', 'bash', 'subagent']
 ```
 
 | 字段 | 默认 | 含义 |
@@ -133,21 +138,21 @@ plan mode 让**模型**调用 `exit_plan_mode` 来结束规划。它仍然是一
 
 ## 兼容性
 
-本版本（0.2.1）针对 **DSH v0.2.1-rc.2** 编写：
+本版本（0.2.2）针对 **DSH v0.2.2-rc.1** 编写：
 
 | 声明 | 值 |
 |---|---|
 | `engines.dsh` | `>=0.2.1-rc.2 <0.3.0` |
-| 五个 `@deepseek-ai/dsh-*` peer | `0.2.1-rc.2` |
+| 五个 `@deepseek-ai/dsh-*` peer | `0.2.2-rc.1` |
 | `dsh.manifestVersion` | `1` |
 
 DSH 的插件兼容性预检（v0.2.1-alpha.3 起）先读 manifest 自己的 `engines.dsh`，没有才拿运行时版本逐个匹配 `@deepseek-ai/dsh-*` peer（`includePrerelease` 语义）。把范围写进 manifest，装错宿主版本时由预检直接拒绝，而不是等运行到一半才炸。
 
-**DSH 0.2.0-rc.2 及更早不再支持**：旧清单把五个 peer 固定为 `0.2.0-rc.2`，精确范围不满足运行时 `0.2.1-rc.2`，预检会判为不兼容并拒绝加载插件的行。
+**DSH 0.2.0-rc.2 及更早不再支持**：旧清单把五个 peer 固定为 `0.2.0-rc.2`，精确范围不满足运行时 `0.2.2-rc.1`，预检会判为不兼容并拒绝加载插件的行。
 
 ## 安装
 
-要求 DSH **v0.2.1-rc.2**（见上文「兼容性」）。本包是一个 bundle（`package.json` 里的 `dsh.bundle.patch` 指向两个补丁层：`cordis.patch.yml` 挂插件行，`presets/discuss.patch.yml` 声明那条 Agent 预设），安装它就会自动激活，无需手工编辑 profile：
+要求 DSH **v0.2.2-rc.1**（见上文「兼容性」）。本包是一个 bundle（`package.json` 里的 `dsh.bundle.patch` 指向两个补丁层：`cordis.patch.yml` 挂插件行，`presets/discuss.patch.yml` 声明那条 Agent 预设），安装它就会自动激活，无需手工编辑 profile：
 
 ```powershell
 & 'D:\DSHD\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add 'D:\OneDrive\Desktop\Code\dsh\dsh-discuss-mode'
@@ -172,8 +177,9 @@ DSH 的插件兼容性预检（v0.2.1-alpha.3 起）先读 manifest 自己的 `e
 - **讨论模式与 plan mode 可以同时激活**，此时两段策略文本都会渲染（顺序为 500 的 `plan:policy`，然后是 550 的 `discuss:policy`）。实际使用中你不会想同时开两个。
 - **面板的按钮切换的是"当前显示的会话"**，判定方式是 `retainedBy.mainView > 0`——与 DSH 自带的 Workspace、Open-in-app 插件用的是同一个办法。没有打开会话时按钮禁用。
 - **模式下拉框那条预设只对新会话生效。** DSH 的 Agent 预设是会话级的：空白会话可以换，开过一轮之后宿主直接拒绝（`agent-preset/locked`）。所以"当前会话进讨论模式"永远走 `/discuss` 或面板，下拉框只负责开一条新的。
-- **预设里那份工具面是快照，不是引用。** 它抄的是 `@deepseek-ai/dsh-web-app@0.2.1-rc.2` 的 `presets/standard.patch.yml`：这一版的标准模式多了 `time-context`、`tool-schedule`、`tool-plugin-market`（最后一个 disabled），少了 `tool-subagent-codex`、`tool-subagent-claude-code`、`tool-ralph` 三行以及 `backgroundMode` 配置。升级 DSH 后标准模式再变时，讨论模式预设里那份不会自己跟着长——跑 `node tools/sync-preset.mjs` 重抄；`node test/verify.mjs` 会检查生成标记、`{{cwd}}` 缺席与这些关键行的有无，`tools/sync-preset.mjs --check` 则直接告诉你它是否已经过期。宿主没有"预设继承另一条预设"的写法，这是唯一的选择。
+- **预设里那份工具面是快照，不是引用。** 它抄的是 `@deepseek-ai/dsh-web-app@0.2.2-rc.1` 的 `presets/standard.patch.yml`：这一版的标准模式给 `tool-fs` 加了 `config.applyPatch: false`（`apply_patch` 默认不出现在工具面里），`tool-subagent` 用 `modelSelection` + `modelDiscovery` 两项，`tool-subagent-control/list-agents` 与 `modelSelectionSettings` 已移除，`tool-plugin-manager` 改为按 `profileContext` 条件禁用。升级 DSH 后标准模式再变时，讨论模式预设里那份不会自己跟着长——跑 `node tools/sync-preset.mjs --file <standard.patch.yml>`（桌面版用 `--asar`）重抄；`node test/verify.mjs` 会检查生成标记、`{{cwd}}` 缺席与这些关键行的有无，`--check` 则直接告诉你它是否已经过期。宿主没有"预设继承另一条预设"的写法，这是唯一的选择。
 - **预设的 id 是可配置的**（`presetId`，默认 `discuss`）：只装插件、不装这条预设的部署完全不受影响——没有哪条会话的 `agentPreset` 会等于它，模式照旧只由 `/discuss` 开关。
+- **0.2.2 新增的 `apply_patch` 已列入拒绝清单。** 它在标准模式里默认关闭，但任何组合把它打开都不会让讨论模式的「写入类工具不可用」落空：`apply_patch` 与 `write` / `edit` 一起由 guard 拒绝。老快照不会自动带上这条，所以这次同时重抄了预设并补了回归测试。
 - **0.2.1 新增的 `working_directory` 不在拒绝清单里。** 它是"查询当前目录"和"进入另一个目录"二合一的工具：只读查询对讨论有用，换目录也只是把读取范围挪进项目内部，真正会改变世界的仍是 `write` / `edit` / `pwsh` 那些。想要更严格的立场，把它加进 `blockedTools` 即可。
 - **不强制"必须讨论 N 轮"**：那不是约束能解决的问题，只会制造噪音。这个模式只保证两件事——模型没法自己出去，也没法动手。
 - **对齐是话轮协议，不是状态机。** "什么时候算聊完"由模型自己判断，而交付是纯文本、没有工具调用可供拦截，所以策略文本仍可能被绕过——模型仍可能把草案和交接 prompt 放进同一轮。若这种情况频繁发生，下一步不是继续加措辞，而是把"要 prompt"做成**用户侧事件**（面板按钮或命令），让交付由用户触发。
@@ -184,11 +190,11 @@ DSH 的插件兼容性预检（v0.2.1-alpha.3 起）先读 manifest 自己的 `e
 
 | 关注点 | 机制 |
 |---|---|
-| 兼容性 | `package.json` 声明 `engines.dsh: '>=0.2.1-rc.2 <0.3.0'`、五个 `@deepseek-ai/dsh-*` peer 固定 `0.2.1-rc.2`、`dsh.manifestVersion: 1`——宿主兼容性预检据此放行 |
+| 兼容性 | `package.json` 声明 `engines.dsh: '>=0.2.1-rc.2 <0.3.0'`、五个 `@deepseek-ai/dsh-*` peer 固定 `0.2.2-rc.1`、`dsh.manifestVersion: 1`——宿主兼容性预检据此放行 |
 | 提示词段落 | `ctx.systemPrompt.section({ name: 'discuss:policy', order: 550 })` |
 | 工具拒绝 | `ctx.tools.guard(exec => string \| undefined)`，按会话状态条件判断 |
 | 斜杠命令 | `ctx.commands.register({ name: 'discuss', input: { hint: '[off\|message]', attachments: true } })` |
-| 状态 | `ctx.sessionProjections.register({ key: 'discuss', apply, wire })`，`stateVersion: 2` |
+| 状态 | `const handle = await ctx.sessionProjections.register({ key: 'discuss', apply, wire })`，之后用 `handle.stateOf(session)` 同步读；`stateVersion: 2` |
 | 预设入口 | `package.json` 的 `dsh.bundle.patch` 是**有序数组**：`cordis.patch.yml` 之后追一层 `presets/discuss.patch.yml`，后者插一行 `@deepseek-ai/dsh-agent-preset`（`config.id: discuss`） |
 | 预设会话的默认状态 | 投影 `init(header)` 读表头的 `agentPreset`，`apply` 再折叠 `agent-preset/selected`；一旦有 `/discuss` 的 settled 决定，决定优先于预设 |
 | 侧边栏入口 | `ctx.slots.inject('sidebar.panellist', ...)`，`order: 20` |
@@ -215,7 +221,7 @@ powershell -ExecutionPolicy Bypass -File tools\push-via-api.ps1
 
 ## 验证
 
-`test/verify.mjs` 是随附的隔离测试：给 `@deepseek-ai/dsh-llm` 打桩后真实导入宿主侧代码，用假 ctx 跑通 `apply()` 的接线，并检查状态机（两个入口的先后、`/discuss off` 不会被预设撤销）、配置校验、工具匹配器、命令分支、两层补丁的清单与形状、客户端契约（含**两半策略文本必须逐字相同**的一致性断言）。0.2.1 适配后它还盯住兼容性声明与预设快照：`version` 是 0.2.x、`engines.dsh` 的范围、五个 `@deepseek-ai/dsh-*` peer 固定 `0.2.1-rc.2`、`dsh.manifestVersion === 1`，以及生成标记存在、`{{cwd}}` 缺席、`time-context` / `tool-schedule` / `tool-plugin-market` 在列、codex / claude-code / ralph 行与 `backgroundMode` 不在列。设了 `DSH_APP_ASAR` 时它还会顺带跑一次 sync 的 `--check`，没设就跳过，不算失败。
+`test/verify.mjs` 是随附的隔离测试：给 `@deepseek-ai/dsh-llm` 打桩后真实导入宿主侧代码，用假 ctx 跑通 `apply()` 的接线，并检查状态机（两个入口的先后、`/discuss off` 不会被预设撤销）、配置校验、工具匹配器、命令分支、两层补丁的清单与形状、客户端契约（含**两半策略文本必须逐字相同**的一致性断言）。0.2.2 适配后它还盯住异步投影接口（`apply()` 等待注册、经句柄 `stateOf` 读状态，旧 `stateOf(session, key)` 一旦被调用就报错）、兼容性声明与预设快照：`version` 是 0.2.x、`engines.dsh` 的范围、五个 `@deepseek-ai/dsh-*` peer 固定 `0.2.2-rc.1`、`dsh.manifestVersion === 1`，以及生成标记存在、`{{cwd}}` 缺席、`applyPatch: false` / `modelDiscovery` 在列、`time-context` / `tool-schedule` / `tool-plugin-market` 在列、codex / claude-code / ralph / `tool-subagent-list-agents` 与 `backgroundMode` 不在列。设了 `DSH_APP_ASAR`（桌面版）或 `DSH_PRESET_FILE`（npm 安装）时它还会顺带跑一次 sync 的 `--check`，都没设就跳过，不算失败。
 
 ```powershell
 node test/verify.mjs
@@ -226,12 +232,15 @@ node test/verify.mjs
 `tools/sync-preset.mjs` 回答的是另一个问题：**生成区是否还等于安装里的标准预设**。
 
 ```powershell
+# npm 安装
+node tools/sync-preset.mjs --check --file /path/to/dsh/node_modules/@deepseek-ai/dsh-web-app/presets/standard.patch.yml
+# 桌面版
 $env:DSH_APP_ASAR='D:\DSHD\resources\app.asar'; node tools/sync-preset.mjs --check
 ```
 
-一致时 exit 0；不一致时 exit 1，并说明 `presets/discuss.patch.yml` 需要重抄（去掉 `--check` 就是就地重写）。它依赖装好的 DSH（从 `app.asar` 里读标准预设），所以和离线可跑的 `test/verify.mjs` 分开。
+一致时 exit 0；不一致时 exit 1，并说明 `presets/discuss.patch.yml` 需要重抄（去掉 `--check` 就是就地重写）。它依赖装好的 DSH（普通文件或 `app.asar`），所以和离线可跑的 `test/verify.mjs` 分开。
 
-`tools/asar-extract.mjs` 是查**装好的那份 DSH**用的：仓库旁边的参考检出往往落后于安装版本（本插件这一版就是照着安装的 0.2.1-rc.2 适配的），而 `presets/standard.patch.yml`、`dsh-agent-preset-registry` 的实现都躺在 `app.asar` 里。它只读不写：
+`tools/asar-extract.mjs` 是查**桌面版装好的那份 DSH**用的：仓库旁边的参考检出往往落后于安装版本（本插件这一版是对着安装的 0.2.2-rc.1 适配的），而 `presets/standard.patch.yml`、`dsh-agent-preset-registry` 的实现都躺在 `app.asar` 里。它只读不写：
 
 ```powershell
 node tools/asar-extract.mjs 'D:\DSHD\resources\app.asar' list 'dsh-agent-preset'

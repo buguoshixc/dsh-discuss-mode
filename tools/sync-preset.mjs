@@ -2,20 +2,27 @@
 //
 // `presets/discuss.patch.yml` carries a generated region bounded by the two
 // marker comments below. It is a snapshot of the shipped `standard` Agent preset
-// of `@deepseek-ai/dsh-web-app` inside the installed desktop app's `app.asar`,
-// with only the declaration identity rewritten: the row id `preset-standard`
-// becomes `preset-discuss`, `config.id: standard` becomes `discuss`,
-// `config.order: 1` becomes `5`, and the preset's `config.name` /
-// `config.description` lines are kept from the current file (they are this
-// bundle's identity, not the shipped preset's). The hand-written preamble above
-// the BEGIN marker is never touched.
+// of `@deepseek-ai/dsh-web-app`, with only the declaration identity rewritten:
+// the row id `preset-standard` becomes `preset-discuss`, `config.id: standard`
+// becomes `discuss`, `config.order: 1` becomes `5`, and the preset's
+// `config.name` / `config.description` lines are kept from the current file
+// (they are this bundle's identity, not the shipped preset's). The hand-written
+// preamble above the BEGIN marker is never touched.
 //
-//   node tools/sync-preset.mjs --asar <path-to-app.asar>   # rewrite the region
-//   node tools/sync-preset.mjs --check --asar <...>        # exit 1 on drift
-//   DSH_APP_ASAR='<path>' node tools/sync-preset.mjs       # same, env-supplied
+// The shipped preset is read from either install shape:
+//
+//   npm-installed DSH:  <dsh>/node_modules/@deepseek-ai/dsh-web-app/presets/standard.patch.yml
+//   desktop app:        dsh/node_modules/@deepseek-ai/dsh-web-app/presets/standard.patch.yml
+//                       inside the app's app.asar
+//
+//   node tools/sync-preset.mjs --file <standard.patch.yml>   # rewrite the region
+//   node tools/sync-preset.mjs --check --file <...>          # exit 1 on drift
+//   node tools/sync-preset.mjs --asar <path-to-app.asar>     # desktop app.asar
+//   DSH_PRESET_FILE='<path>' node tools/sync-preset.mjs      # same, env-supplied
+//   DSH_APP_ASAR='<path>' node tools/sync-preset.mjs         # same, env-supplied
 //
 // Exit codes: 0 in sync (or rewritten), 1 drift (--check) or a read/lookup
-// failure, 2 usage error. The archive is only read; the only write is
+// failure, 2 usage error. Either source is only read; the only write is
 // `presets/discuss.patch.yml` in default mode.
 import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
@@ -31,17 +38,19 @@ const presetLabel = relative(packageDir, presetPath).replaceAll('\\', '/')
 const BEGIN_MARKER = '# --- BEGIN GENERATED PRESET (node tools/sync-preset.mjs) ---'
 const END_MARKER = '# --- END GENERATED PRESET ---'
 
-/** Where the shipped standard preset lives inside the desktop app's `app.asar`. */
-const SHIPPED_PRESET = 'dsh/node_modules/@deepseek-ai/dsh-web-app/presets/standard.patch.yml'
+/** The shipped standard preset's path inside an npm-installed DSH. */
 const SHIPPED_PRESET_TAIL = 'node_modules/@deepseek-ai/dsh-web-app/presets/standard.patch.yml'
+/** The same path inside the desktop app's `app.asar`. */
+const SHIPPED_PRESET = `dsh/${SHIPPED_PRESET_TAIL}`
 
-const USAGE = `usage: node tools/sync-preset.mjs [--check] [--asar <path-to-app.asar>]
+const USAGE = `usage: node tools/sync-preset.mjs [--check] (--file <standard.patch.yml> | --asar <path-to-app.asar>)
 
 Regenerate the marked generated region of ${presetLabel} from the installed DSH's
-shipped standard Agent preset
-(${SHIPPED_PRESET}, inside the desktop app's app.asar).
+shipped standard Agent preset, read either as an ordinary file (npm-installed DSH)
+or from the desktop app's app.asar.
 
-  --asar <path>  installed app.asar to read; required unless DSH_APP_ASAR is set
+  --file <path>  installed standard.patch.yml to read; or set DSH_PRESET_FILE
+  --asar <path>  installed app.asar to read; or set DSH_APP_ASAR
   --check        write nothing; exit 1 when the generated region is stale
   -h, --help     show this message`
 
@@ -58,9 +67,14 @@ function escapeRegExp(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-/** @param {string[]} argv @returns {{ check: boolean, asar: string, help: boolean }} */
+/** @param {string[]} argv @returns {{ check: boolean, asar: string, file: string, help: boolean }} */
 function parseOptions(argv) {
-  const options = { check: false, asar: process.env.DSH_APP_ASAR ?? '', help: false }
+  const options = {
+    check: false,
+    asar: process.env.DSH_APP_ASAR ?? '',
+    file: process.env.DSH_PRESET_FILE ?? '',
+    help: false,
+  }
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (argument === '--check') {
@@ -70,6 +84,15 @@ function parseOptions(argv) {
       if (value === undefined || value.startsWith('--')) throw new UsageError('--asar needs a path')
       options.asar = value
       index += 1
+    } else if (argument === '--file') {
+      const value = argv[index + 1]
+      if (value === undefined || value.startsWith('--')) throw new UsageError('--file needs a path')
+      options.file = value
+      index += 1
+    } else if (argument.startsWith('--file=')) {
+      const value = argument.slice('--file='.length)
+      if (value === '') throw new UsageError('--file needs a path')
+      options.file = value
     } else if (argument.startsWith('--asar=')) {
       const value = argument.slice('--asar='.length)
       if (value === '') throw new UsageError('--asar needs a path')
@@ -84,11 +107,25 @@ function parseOptions(argv) {
 }
 
 /**
+ * Validate one shipped standard preset and normalize its final newline.
+ * @param {string} text - raw file or archive content.
+ * @param {string} sourcePath - where it was read from, for failure messages.
+ * @returns {string} LF-normalized text with exactly one trailing newline.
+ */
+function validateShippedPreset(text, sourcePath) {
+  const normalized = normalize(text)
+  if (!normalized.includes("name: '@deepseek-ai/dsh-agent-preset'")) {
+    throw new Error(`${sourcePath} does not look like an Agent preset declaration`)
+  }
+  return normalized.endsWith('\n') ? normalized : `${normalized}\n`
+}
+
+/**
  * Read the shipped standard preset out of the installed archive.
  * @param {string} archivePath - path to the desktop app's `app.asar`.
  * @returns {string} its text, normalized to LF with a single trailing newline.
  */
-function readShippedPreset(archivePath) {
+function readShippedPresetFromArchive(archivePath) {
   let archive
   try {
     archive = openAsar(archivePath)
@@ -107,12 +144,38 @@ function readShippedPreset(archivePath) {
     )
   }
   const [path, node] = matches[0]
-  let text = normalize(archive.bytesOf(node).toString('utf8'))
-  if (!text.endsWith('\n')) text += '\n'
-  if (!text.includes("name: '@deepseek-ai/dsh-agent-preset'")) {
-    throw new Error(`${path} does not look like an Agent preset declaration`)
+  return validateShippedPreset(archive.bytesOf(node).toString('utf8'), path)
+}
+
+/**
+ * Read the shipped standard preset from an npm-installed DSH's plain file.
+ * @param {string} filePath - path to `presets/standard.patch.yml`.
+ * @returns {string} its text, normalized to LF with a single trailing newline.
+ */
+function readShippedPresetFromFile(filePath) {
+  let text
+  try {
+    text = readFileSync(filePath, 'utf8')
+  } catch (error) {
+    throw new Error(
+      `cannot read shipped standard preset at ${filePath} (${String(error?.code ?? error?.message ?? error)})`,
+    )
   }
-  return text
+  return validateShippedPreset(text, filePath)
+}
+
+/**
+ * Read the shipped preset from the install shape the caller selected.
+ * @param {{ asar: string, file: string }} options
+ * @returns {{ text: string, source: string }} its text and the resolved source path.
+ */
+function readShippedPreset(options) {
+  if (options.asar !== '') {
+    const archivePath = resolve(options.asar)
+    return { text: readShippedPresetFromArchive(archivePath), source: archivePath }
+  }
+  const filePath = resolve(options.file)
+  return { text: readShippedPresetFromFile(filePath), source: filePath }
 }
 
 /**
@@ -210,17 +273,17 @@ function firstDifference(current, expected) {
   return null
 }
 
-/** @param {{ check: boolean, asar: string }} options */
+/** @param {{ check: boolean, asar: string, file: string }} options */
 function run(options) {
-  const archivePath = resolve(options.asar)
   const current = normalize(readFileSync(presetPath, 'utf8'))
   const { preamble, region } = locateMarkers(current)
   const identity = extractIdentity(region)
-  const generated = buildGeneratedRegion(readShippedPreset(archivePath), identity)
+  const source = readShippedPreset(options)
+  const generated = buildGeneratedRegion(source.text, identity)
   const expected = `${preamble}${BEGIN_MARKER}\n${generated}${END_MARKER}\n`
 
   if (current === expected) {
-    console.log(`sync-preset: ${presetLabel} already matches ${archivePath}`)
+    console.log(`sync-preset: ${presetLabel} already matches ${source.source}`)
     return
   }
   if (options.check) {
@@ -231,14 +294,15 @@ function run(options) {
         : `\n  first difference at line ${String(difference.line)}:` +
           `\n    got:  ${JSON.stringify(difference.got)}` +
           `\n    want: ${JSON.stringify(difference.want)}`
+    const flag = options.asar !== '' ? '--asar' : '--file'
     throw new Error(
-      `${presetLabel} is out of sync with ${archivePath}${detail}\n` +
-        `  run: node tools/sync-preset.mjs --asar ${archivePath} to rewrite the generated region`,
+      `${presetLabel} is out of sync with ${source.source}${detail}\n` +
+        `  run: node tools/sync-preset.mjs ${flag} ${source.source} to rewrite the generated region`,
     )
   }
   writeFileSync(presetPath, expected)
   console.log(
-    `sync-preset: rewrote the generated region of ${presetLabel} (${String(Buffer.byteLength(expected))} bytes) from ${archivePath}`,
+    `sync-preset: rewrote the generated region of ${presetLabel} (${String(Buffer.byteLength(expected))} bytes) from ${source.source}`,
   )
 }
 
@@ -255,8 +319,16 @@ function main(argv) {
     console.log(USAGE)
     return
   }
-  if (options.asar === '') {
-    console.error(`sync-preset: no app.asar given; pass --asar <path> or set DSH_APP_ASAR\n\n${USAGE}`)
+  if (options.asar !== '' && options.file !== '') {
+    console.error(`sync-preset: pass either --file (npm install) or --asar (desktop app), not both\n\n${USAGE}`)
+    process.exitCode = 2
+    return
+  }
+  if (options.asar === '' && options.file === '') {
+    console.error(
+      `sync-preset: no shipped preset given; pass --file <standard.patch.yml> (npm install) ` +
+        `or --asar <app.asar> (desktop app), or set DSH_PRESET_FILE / DSH_APP_ASAR\n\n${USAGE}`,
+    )
     process.exitCode = 2
     return
   }

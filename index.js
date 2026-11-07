@@ -175,6 +175,7 @@ const DEFAULT_BLOCKED_TOOLS = [
   // Files and code.
   "write",
   "edit",
+  "apply_patch",
   // Command execution.
   "pwsh",
   "bash",
@@ -414,20 +415,6 @@ function compileToolMatcher(patterns) {
   return (name) => exact.has(name) || prefixes.some((prefix) => name.startsWith(prefix));
 }
 
-/**
- * Read the mode state for one session. `stateOf` answers `undefined` only when
- * the unit is not registered, which cannot happen while this plugin is mounted;
- * a guard must never throw, so the read degrades to "inactive" instead.
- *
- * @param ctx - plugin context carrying `sessionProjections`.
- * @param session - the session to read.
- * @param presetId - the configured preset entrance.
- * @returns whether discussion mode is active for that session.
- */
-function isActive(ctx, session, presetId) {
-  return isModeActive(ctx.sessionProjections.stateOf(session, PROJECTION_KEY), presetId);
-}
-
 export const name = "discuss-mode";
 
 /**
@@ -441,18 +428,28 @@ export const inject = ["tools", "systemPrompt", "sessionProjections"];
  * Mount discussion mode: the stance section, the log-derived state unit, the
  * deny guard, and the `/discuss` command.
  *
- * Every registration is wrapped in `ctx.effect(...)`. Registrations made
- * through a service land on *that service's* fiber, not this plugin's, so
- * without the wrapper an unload/reload would leave a stale section behind and
- * the next mount would collide on the section name.
+ * Every registration except the awaited projection is wrapped in `ctx.effect(...)`.
+ * Registrations made through a service land on *that service's* fiber, not this
+ * plugin's, so without the wrapper an unload/reload would leave a stale section
+ * behind and the next mount would collide on the section name. The projection is
+ * registered by awaiting the 0.2.2 handle contract instead; this plugin's fiber
+ * owns that registration and releases it on unload.
  *
  * @param ctx - the plugin's context.
  * @param config - the row's config, absent when the patch sets none.
  */
-export function apply(ctx, config) {
+export async function apply(ctx, config) {
   const resolved = resolveConfig(config);
   const blocked = compileToolMatcher(resolved.blockedTools);
   const presetId = resolved.presetId;
+
+  // 0.2.2 registration is async and returns a handle: `stateOf(session)` is a
+  // synchronous read on that handle, and the plugin's own fiber owns the
+  // registration, releasing it on unload. The legacy `ctx.effect(() =>
+  // register(...))` + registry-level `stateOf(session, key)` pair is deprecated
+  // and warns on first read, so neither is used here.
+  const projection = await ctx.sessionProjections.register(createDiscussProjection(presetId));
+  const activeFor = (session) => isModeActive(projection.stateOf(session), presetId);
 
   ctx.effect(
     () =>
@@ -460,16 +457,11 @@ export function apply(ctx, config) {
         name: SECTION_NAME,
         order: SECTION_ORDER,
         text: (context) =>
-          context.agent !== undefined && isActive(ctx, context.agent.session, presetId)
+          context.agent !== undefined && activeFor(context.agent.session)
             ? resolved.section
             : "",
       }),
     "dsh-discuss-mode: policy section",
-  );
-
-  ctx.effect(
-    () => ctx.sessionProjections.register(createDiscussProjection(presetId)),
-    "dsh-discuss-mode: state projection",
   );
 
   // A monotonic guard, not a `tools/pre-execute` listener: the denial must hold
@@ -483,7 +475,7 @@ export function apply(ctx, config) {
         const agent = exec.agent;
         if (agent === undefined) return undefined;
         if (!blocked(exec.name)) return undefined;
-        if (!isActive(ctx, agent.session, presetId)) return undefined;
+        if (!activeFor(agent.session)) return undefined;
         return resolved.denial.replaceAll("{tool}", exec.name);
       }),
     "dsh-discuss-mode: tool guard",
@@ -506,7 +498,7 @@ export function apply(ctx, config) {
             if (message === "off") {
               return {
                 kind: "success",
-                text: isActive(ctx, agent.session, presetId)
+                text: activeFor(agent.session)
                   ? "讨论模式已关闭。"
                   : "讨论模式本来就是关闭的。",
               };

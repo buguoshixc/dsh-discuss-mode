@@ -9,9 +9,10 @@
  * package itself. The sandbox is disposable and git-ignored.
  *
  * It also pins the manifest and the generated preset snapshot to the installed
- * DSH v0.2.1-rc.2 contract, with no dependency on the installed build: set
- * `DSH_APP_ASAR` to additionally run `tools/sync-preset.mjs --check` against
- * the real `app.asar` (skipped silently when unset).
+ * DSH v0.2.2-rc.1 contract, with no dependency on the installed build: set
+ * `DSH_APP_ASAR` (desktop app) or `DSH_PRESET_FILE` (npm-installed DSH) to
+ * additionally run `tools/sync-preset.mjs --check` against the real shipped
+ * preset (skipped silently when neither is set).
  *
  * Run: node test/verify.mjs
  */
@@ -246,7 +247,7 @@ checkThrows("a blank blockedTools entry throws", () => mod.resolveConfig({ block
 
 console.log("\n[5] tool matcher");
 const blocked = mod.compileToolMatcher(defaults.blockedTools);
-for (const name of ["write", "edit", "pwsh", "bash", "subagent", "create_goal", "job_kill"]) {
+for (const name of ["write", "edit", "apply_patch", "pwsh", "bash", "subagent", "create_goal", "job_kill"]) {
   check(`blocks ${name}`, blocked(name) === true);
 }
 check("blocks the agent_teams_* family", blocked("agent_teams_create") === true);
@@ -258,7 +259,7 @@ for (const name of ["read", "glob", "grep", "read_image", "web_search", "web_fet
 
 // ------------------------------------------------------------------- apply ---
 console.log("\n[6] apply() wiring against a fake context");
-function mount(config) {
+async function mount(config) {
   const stateBySession = new Map();
   const seen = { section: null, guard: null, projection: null, command: null, effects: [], injects: [] };
   const ctx = {
@@ -277,12 +278,22 @@ function mount(config) {
       },
     },
     sessionProjections: {
-      register(definition) {
+      async register(definition) {
         seen.projection = definition;
-        return () => {};
+        return {
+          stateOf(session) {
+            return stateBySession.get(session);
+          },
+          async dispose() {},
+          readerFor(session) {
+            return () => stateBySession.get(session);
+          },
+        };
       },
-      stateOf(session) {
-        return stateBySession.get(session);
+      // 0.2.2 deprecates the registry-level read; the plugin must go through the
+      // awaited registration's handle, so reaching for this is a test failure.
+      stateOf() {
+        throw new Error("the plugin must read through the awaited registration handle");
       },
     },
     tools: {
@@ -298,11 +309,11 @@ function mount(config) {
       },
     },
   };
-  mod.apply(ctx, config);
+  await mod.apply(ctx, config);
   return { seen, stateBySession };
 }
 
-const { seen, stateBySession } = mount(undefined);
+const { seen, stateBySession } = await mount(undefined);
 
 check("registers the policy section", seen.section?.name === "discuss:policy");
 check("uses order 550, after plan:policy(500) and before team:policy(600)", seen.section?.order === 550);
@@ -312,8 +323,8 @@ check("registers the /discuss command", seen.command?.name === "discuss");
 check("declares the attachment capability", seen.command?.input?.attachments === true);
 check("injects commands optionally", seen.injects.includes("commands"));
 check(
-  "every registration is wrapped in ctx.effect",
-  seen.effects.length === 4,
+  "every registration except the awaited projection is wrapped in ctx.effect",
+  seen.effects.length === 3,
   `labels: ${seen.effects.join(" | ")}`,
 );
 
@@ -354,7 +365,7 @@ check("denies write in a preset session", typeof call("write", presetSessionOnly
 check("allows a read tool in a preset session", call("read", presetSessionOnly) === undefined);
 
 console.log("\n[8b] the preset entrance can be configured away");
-const withoutPreset = mount({ presetId: null });
+const withoutPreset = await mount({ presetId: null });
 const presetSessionBare = { id: "s-preset-bare" };
 withoutPreset.stateBySession.set(presetSessionBare, presetSession);
 check(
@@ -422,7 +433,7 @@ check(
   "manifest exports the preset layer",
   manifest.exports?.["./presets/*.patch.yml"] === "./presets/*.patch.yml",
 );
-// The 0.2.1 compatibility declaration: the preflight reads `engines.dsh` first and
+// The 0.2.2 compatibility declaration: the preflight reads `engines.dsh` first and
 // rejects exact peer ranges that do not satisfy the runtime, so the release intent
 // has to be visible here rather than only in the peer pin.
 check(
@@ -448,8 +459,8 @@ const dshPeers = Object.entries(manifest.peerDependencies ?? {}).filter(([name])
 );
 check("manifest keeps the five DSH peer packages", dshPeers.length === 5, `got ${dshPeers.length}`);
 check(
-  "every DSH peer dependency pins 0.2.1-rc.2",
-  dshPeers.every(([, range]) => range === "0.2.1-rc.2"),
+  "every DSH peer dependency pins 0.2.2-rc.1",
+  dshPeers.every(([, range]) => range === "0.2.2-rc.1"),
   dshPeers.map(([name, range]) => `${name}@${range}`).join(", "),
 );
 check(
@@ -483,7 +494,7 @@ check(
 );
 check("preset patch does not compose the mode row a second time", !presetPatch.includes("dsh-discuss-mode"));
 check("preset patch uses spaces, not tabs", !presetPatch.includes("\t"));
-// The generated region is the shipped 0.2.1 `standard` preset with only the
+// The generated region is the shipped 0.2.2 `standard` preset with only the
 // declaration identity rewritten; `tools/sync-preset.mjs` owns re-snapshotting it.
 const BEGIN_MARKER = "# --- BEGIN GENERATED PRESET (node tools/sync-preset.mjs) ---";
 const END_MARKER = "# --- END GENERATED PRESET ---";
@@ -508,7 +519,12 @@ check(
   "preset patch ends after the END marker with exactly one newline",
   presetPatch.endsWith(`${END_MARKER}\n`) && !presetPatch.endsWith("\n\n") && !presetPatch.includes("\r"),
 );
-check("the 0.2.1 snapshot resolves no {{cwd}}", !presetPatch.includes("{{cwd}}"));
+check("the 0.2.2 snapshot resolves no {{cwd}}", !presetPatch.includes("{{cwd}}"));
+check(
+  "the 0.2.2 snapshot disables apply_patch beside edit",
+  presetPatch.includes("applyPatch: false"),
+);
+check("the 0.2.2 snapshot keeps subagent model discovery", presetPatch.includes("modelDiscovery: true"));
 for (const name of [
   "@deepseek-ai/dsh-time-context",
   "@deepseek-ai/dsh-tool-schedule",
@@ -520,6 +536,8 @@ for (const removed of [
   "tool-ralph",
   "tool-subagent-codex",
   "tool-subagent-claude-code",
+  "tool-subagent-list-agents",
+  "modelSelectionSettings",
   "backgroundMode",
   "exit_plan_mode succeeds",
 ]) {
@@ -536,27 +554,57 @@ try {
 }
 check("ships the preset sync tool", typeof syncSource === "string");
 check(
-  "the sync tool takes the archive from --asar / DSH_APP_ASAR, not a hardcoded path",
+  "the sync tool takes the shipped preset from --file/--asar or their env vars, not a hardcoded path",
   typeof syncSource === "string" &&
+    syncSource.includes("--file") &&
+    syncSource.includes("DSH_PRESET_FILE") &&
+    syncSource.includes("--asar") &&
     syncSource.includes("DSH_APP_ASAR") &&
     syncSource.includes("--check") &&
     !syncSource.includes("D:\\DSHD") &&
     !syncSource.includes("D:/DSHD"),
 );
+// The two install shapes are exclusive, and a missing source is a usage error;
+// neither case may touch the preset file.
+const noSource = spawnSync(process.execPath, [join(pkgDir, "tools", "sync-preset.mjs"), "--check"], {
+  cwd: pkgDir,
+  env: { ...process.env, DSH_APP_ASAR: "", DSH_PRESET_FILE: "" },
+  encoding: "utf8",
+});
+check("the sync tool rejects a run with no source", noSource.status === 2, `exit ${String(noSource.status)}`);
+const bothSources = spawnSync(
+  process.execPath,
+  [join(pkgDir, "tools", "sync-preset.mjs"), "--check", "--file", "standard.patch.yml", "--asar", "app.asar"],
+  { cwd: pkgDir, env: { ...process.env, DSH_APP_ASAR: "", DSH_PRESET_FILE: "" }, encoding: "utf8" },
+);
+check("the sync tool rejects two sources at once", bothSources.status === 2, `exit ${String(bothSources.status)}`);
+
 const asarForSync = process.env.DSH_APP_ASAR;
-if (asarForSync === undefined || asarForSync.trim() === "") {
-  console.log("  skip tools/sync-preset.mjs --check (DSH_APP_ASAR is not set)");
-} else {
+const presetFileForSync = process.env.DSH_PRESET_FILE;
+if (asarForSync !== undefined && asarForSync.trim() !== "") {
   const sync = spawnSync(process.execPath, [join(pkgDir, "tools", "sync-preset.mjs"), "--check"], {
     cwd: pkgDir,
     env: { ...process.env, DSH_APP_ASAR: asarForSync },
     encoding: "utf8",
   });
   check(
-    "the generated snapshot matches the installed DSH standard preset",
+    "the generated snapshot matches the desktop app's shipped standard preset",
     sync.status === 0,
     `${String(sync.stderr ?? "").trim() || String(sync.stdout ?? "").trim()}`,
   );
+} else if (presetFileForSync !== undefined && presetFileForSync.trim() !== "") {
+  const sync = spawnSync(
+    process.execPath,
+    [join(pkgDir, "tools", "sync-preset.mjs"), "--check", "--file", presetFileForSync],
+    { cwd: pkgDir, encoding: "utf8" },
+  );
+  check(
+    "the generated snapshot matches the npm-installed DSH standard preset",
+    sync.status === 0,
+    `${String(sync.stderr ?? "").trim() || String(sync.stdout ?? "").trim()}`,
+  );
+} else {
+  console.log("  skip tools/sync-preset.mjs --check (DSH_APP_ASAR / DSH_PRESET_FILE is not set)");
 }
 /**
  * The registry refuses a composition whose rows are not maps carrying a `name`

@@ -13,7 +13,7 @@
 #     - id: discuss-mode
 #       name: 'dsh-discuss-mode'
 #       config:
-#         blockedTools: ['write', 'edit', 'pwsh', 'bash']
+#         blockedTools: ['write', 'edit', 'apply_patch', 'pwsh', 'bash']
 
 - insert:
     - id: discuss-mode
